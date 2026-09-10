@@ -1,0 +1,21 @@
+# Local credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies and generated builds
+node_modules/
+dist/
+build/
+.next/
+.vinext/
+.wrangler/
+.vercel/
+coverage/
+*.log
+
+# Operating system files
+.DS_Store
+Thumbs.db
