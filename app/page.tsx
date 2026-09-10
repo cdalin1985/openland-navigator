@@ -50,6 +50,7 @@ type SavedLocation = {
   id: string; label: string; type: "place" | "parcel" | "claim" | "map point";
   lon: number; lat: number;
 };
+type StreetViewTarget = { lon: number; lat: number; label: string };
 
 const ROOT = "https://gisservice.mt.gov/arcgis/rest/services";
 const CAD = `${ROOT}/msdi_cadastral_map_v1/MapServer`;
@@ -65,6 +66,7 @@ const money = (n?: number) => n ? `$${n.toLocaleString()}` : "Not listed";
 export default function Home() {
   const target = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
+  const streetViewModeRef = useRef(false);
   const vectors = useRef(new VectorSource());
   const overlays = useRef<Record<string, ImageLayer<ImageArcGISRest>>>({});
   const labelLayers = useRef<Array<ImageLayer<ImageArcGISRest> | TileLayer<XYZ>>>([]);
@@ -88,6 +90,9 @@ export default function Home() {
   const [route, setRoute] = useState<RouteResult | null>(null);
   const [routeChoices, setRouteChoices] = useState<RouteChoice[]>([]);
   const [googleMaps, setGoogleMaps] = useState(false);
+  const [googleBrowserKey, setGoogleBrowserKey] = useState("");
+  const [streetViewMode, setStreetViewMode] = useState(false);
+  const [streetView, setStreetView] = useState<StreetViewTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [navTab, setNavTab] = useState<NavTab>("explore");
   const [savedLocations, setSavedLocations] = useState<SavedLocation[]>(() => {
@@ -239,6 +244,13 @@ export default function Home() {
       setNavTab("explore");
       const [lon, lat] = toLonLat(e.coordinate);
       setClickedLocation({ lon, lat });
+      if (streetViewModeRef.current) {
+        streetViewModeRef.current = false;
+        setStreetViewMode(false);
+        setStreetView({ lon, lat, label: "Selected road" });
+        setParcelOpen(false); setClaimOpen(false); setPlaceResults([]); setLayers(false);
+        return;
+      }
       if (claims.getVisible()) {
         const claimParams = new URLSearchParams({
           f: "json", geometry: `${lon},${lat}`, geometryType: "esriGeometryPoint",
@@ -281,6 +293,7 @@ export default function Home() {
       try {
         const config = await (await fetch("/api/google/config")).json() as { enabled?: boolean; key?: string };
         if (!config.enabled || !config.key) return;
+        setGoogleBrowserKey(config.key);
         const [satelliteSession, streetSession] = await Promise.all([
           createGoogleTileSession(config.key, "satellite"),
           createGoogleTileSession(config.key, "roadmap"),
@@ -375,7 +388,25 @@ export default function Home() {
   }
 
   function openTab(tab: NavTab) {
+    streetViewModeRef.current = false; setStreetViewMode(false); setStreetView(null);
     setNavTab(tab); setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]);
+  }
+
+  function openStreetView(lon: number, lat: number, label: string) {
+    if (!googleBrowserKey) return;
+    streetViewModeRef.current = false; setStreetViewMode(false);
+    setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]);
+    setStreetView({ lon, lat, label });
+  }
+
+  function activateStreetView() {
+    if (!googleBrowserKey) return;
+    if (destination) {
+      openStreetView(+destination.lon, +destination.lat, selectedPlace?.name || destination.display_name.split(",").slice(0, 2).join(","));
+      return;
+    }
+    streetViewModeRef.current = true; setStreetViewMode(true); setStreetView(null);
+    setNavTab("explore"); setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]);
   }
 
   function persistSaved(next: SavedLocation[]) {
@@ -463,7 +494,7 @@ export default function Home() {
       <button className="icon" aria-label="Layers" onClick={() => { setNavTab("explore"); setLayers(v => !v); }}>▱</button>
     </header>
     <div className="live"><i/> LIVE PUBLIC DATA · MONTANA · {googleMaps ? "GOOGLE MAPS" : "OPEN MAP"}</div>
-    <div className="tools"><button onClick={locate}>⌾</button><button onClick={() => map.current?.getView().adjustZoom(1)}>＋</button><button onClick={() => map.current?.getView().adjustZoom(-1)}>−</button></div>
+    <div className="tools"><button aria-label="My location" onClick={locate}>⌾</button><button className={streetViewMode ? "street-view-tool active" : "street-view-tool"} aria-label="Street View" disabled={!googleBrowserKey} onClick={activateStreetView}><StreetViewIcon/></button><button aria-label="Zoom in" onClick={() => map.current?.getView().adjustZoom(1)}>＋</button><button aria-label="Zoom out" onClick={() => map.current?.getView().adjustZoom(-1)}>−</button></div>
 
     {layers && <aside className="panel layer-panel">
       <div className="panel-title"><div><small>MAP DISPLAY</small><h2>Layers</h2></div><button onClick={() => setLayers(false)}>×</button></div>
@@ -495,6 +526,7 @@ export default function Home() {
         <div><span>MAP QUALITY</span><b>{claim.QLTY || "—"}</b></div>
       </div>
       {clickedLocation && <button className="panel-save" onClick={() => saveLocation(claim.CSE_NAME || "Selected mining claim", "claim", clickedLocation.lon, clickedLocation.lat)}>☆ Save claim</button>}
+      {clickedLocation && googleBrowserKey && <button className="panel-street" onClick={() => openStreetView(clickedLocation.lon, clickedLocation.lat, claim.CSE_NAME || "Selected mining claim")}><StreetViewIcon/> Street View</button>}
       <button className="panel-route" onClick={() => routeToMapPoint(claim.CSE_NAME || "Selected mining claim")}>Show routes here ➜</button>
       <p className="record-note">BLM commonly maps claims to the affected PLSS quarter-section. Staked claim boundaries may differ from this display.</p>
     </aside>}
@@ -523,6 +555,7 @@ export default function Home() {
           <p className="mineral-note">A nearby occurrence or old production record is evidence—not proof of minerals beneath this exact parcel. MRDS locations and operating status can be dated; field verification, mineral rights, and permits are separate.</p>
         </section>
         {clickedLocation && <button className="panel-save" onClick={() => saveLocation(parcel.AddressLine1 || parcel.OwnerName || "Selected parcel", "parcel", clickedLocation.lon, clickedLocation.lat)}>☆ Save parcel</button>}
+        {clickedLocation && googleBrowserKey && <button className="panel-street" onClick={() => openStreetView(clickedLocation.lon, clickedLocation.lat, parcel.AddressLine1 || parcel.OwnerName || "Selected parcel")}><StreetViewIcon/> Street View</button>}
         <button className="panel-route" onClick={() => routeToMapPoint(parcel.AddressLine1 || parcel.OwnerName || "Selected parcel")}>Show routes here ➜</button>
         <details><summary>Legal record</summary><p>{parcel.LegalDescriptionShort}<br/>Parcel ID: {parcel.PARCELID}</p></details>
       </> : <div className="loading"><i/><i/><i/></div>}
@@ -545,9 +578,9 @@ export default function Home() {
         </button>)}</div>}
         {selectedPlace && <div className="place-actions">{selectedPlace.phone && <a href={`tel:${selectedPlace.phone}`}>Call</a>}{selectedPlace.website && <a href={selectedPlace.website} target="_blank" rel="noreferrer">Website</a>}</div>}
       </div>
-      <div className="destination-buttons"><button className="save-destination" aria-label="Save destination" onClick={saveCurrentDestination}>☆</button><button onClick={navigate}>{route ? "Re-route" : "Navigate"} ➜</button></div>
+      <div className="destination-buttons"><button className="save-destination" aria-label="Save destination" onClick={saveCurrentDestination}>☆</button>{googleBrowserKey && <button className="street-destination" aria-label="Open Street View" onClick={() => openStreetView(+destination.lon, +destination.lat, selectedPlace?.name || destination.display_name.split(",").slice(0, 2).join(","))}><StreetViewIcon/></button>}<button onClick={navigate}>{route ? "Re-route" : "Navigate"} ➜</button></div>
     </section>}
-    {navTab === "explore" && !destination && !parcelOpen && !claimOpen && placeResults.length === 0 && <div className="panel hint"><b>◎</b><span><strong>Tap the map</strong><small>Owners, public land and active mining claims</small></span></div>}
+    {navTab === "explore" && !destination && !parcelOpen && !claimOpen && placeResults.length === 0 && <div className={streetViewMode ? "panel hint street-hint" : "panel hint"}><b>{streetViewMode ? <StreetViewIcon/> : "◎"}</b><span><strong>{streetViewMode ? "Tap a road for Street View" : "Tap the map"}</strong><small>{streetViewMode ? "Choose a mapped road or roadside location" : "Owners, public land and active mining claims"}</small></span></div>}
 
     {navTab !== "explore" && <section className="panel nav-sheet">
       <div className="nav-sheet-title"><div><small>OPENLAND</small><h2>{navTab === "routes" ? "Routes" : navTab === "saved" ? "Saved places" : "More"}</h2></div><button onClick={() => openTab("explore")}>×</button></div>
@@ -564,10 +597,15 @@ export default function Home() {
         : <div className="tab-empty"><b>No saved locations yet</b><p>Use the ☆ button on a parcel, claim, place, or destination. Saved items stay on this phone.</p><button onClick={() => openTab("explore")}>Find a place</button></div>}
       </div>}
       {navTab === "more" && <div className="tab-content">
-        <div className="quick-grid"><button onClick={() => { openTab("explore"); locate(); }}><b>⌾</b><span>My location</span></button><button onClick={() => { openTab("explore"); setLayers(true); }}><b>▱</b><span>Map layers</span></button><button onClick={() => { setBase(base === "satellite" ? "street" : "satellite"); openTab("explore"); }}><b>◫</b><span>{base === "satellite" ? "Street map" : "Satellite"}</span></button><button onClick={clearMap}><b>⌫</b><span>Clear route</span></button></div>
+        <div className="quick-grid"><button onClick={() => { openTab("explore"); locate(); }}><b>⌾</b><span>My location</span></button><button onClick={() => { openTab("explore"); setLayers(true); }}><b>▱</b><span>Map layers</span></button><button onClick={() => { setBase(base === "satellite" ? "street" : "satellite"); openTab("explore"); }}><b>◫</b><span>{base === "satellite" ? "Street map" : "Satellite"}</span></button><button disabled={!googleBrowserKey} onClick={activateStreetView}><b><StreetViewIcon/></b><span>Street View</span></button><button onClick={clearMap}><b>⌫</b><span>Clear route</span></button></div>
         <div className="about-card"><small>DATA SOURCES</small><p>Google Maps, Montana State Library cadastral data, BLM MLRS active claims, USGS GNIS geographic names, USGS transportation, and USGS mineral records.</p></div>
         <div className="about-card"><small>IPHONE APP</small><p>In Safari, tap Share, then <b>Add to Home Screen</b> to keep OpenLand beside your other navigation apps.</p></div>
       </div>}
+    </section>}
+
+    {streetView && googleBrowserKey && <section className="streetview-panel" aria-label={`Street View: ${streetView.label}`}>
+      <div className="streetview-bar"><div><small>GOOGLE STREET VIEW</small><b>{streetView.label}</b></div><button aria-label="Close Street View" onClick={() => setStreetView(null)}>×</button></div>
+      <iframe title={`Google Street View of ${streetView.label}`} src={`https://www.google.com/maps/embed/v1/streetview?key=${encodeURIComponent(googleBrowserKey)}&location=${streetView.lat},${streetView.lon}&fov=90&heading=0&pitch=0`} allowFullScreen loading="eager" referrerPolicy="no-referrer-when-downgrade" />
     </section>}
 
     <nav aria-label="Primary"><button className={navTab === "explore" ? "active" : ""} onClick={() => openTab("explore")}>⌖<small>Explore</small></button><button className={navTab === "routes" ? "active" : ""} onClick={() => openTab("routes")}>↗<small>Routes</small></button><button className={navTab === "saved" ? "active" : ""} onClick={() => openTab("saved")}>☆<small>Saved</small></button><button className={navTab === "more" ? "active" : ""} onClick={() => openTab("more")}>☰<small>More</small></button></nav>
@@ -628,4 +666,8 @@ function mineralDistanceMiles(lat1: number, lon1: number, lat2: number, lon2: nu
 
 function Layer({ color, title, sub, on, click }: { color: string; title: string; sub: string; on: boolean; click: () => void }) {
   return <button className="layer" onClick={click}><i style={{background: color}}/><span><b>{title}</b><small>{sub}</small></span><em className={on ? "switch on" : "switch"}><u/></em></button>;
+}
+
+function StreetViewIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.6" fill="currentColor"/><path d="M8.2 10.2c0-1.8 1.5-3.2 3.3-3.2h1c1.8 0 3.3 1.4 3.3 3.2v2.3l2.1 2.1-1.7 1.7-2.3-2.3v7h-3v-5.2H9.2V21h-3v-8.6h2z" fill="currentColor"/></svg>;
 }
