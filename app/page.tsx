@@ -51,6 +51,28 @@ type SavedLocation = {
   lon: number; lat: number;
 };
 type StreetViewTarget = { lon: number; lat: number; label: string };
+type StreetViewPanoramaData = { location?: { pano?: string; description?: string } };
+type StreetViewPanoramaInstance = { setVisible: (visible: boolean) => void };
+type StreetViewLibrary = {
+  StreetViewPanorama: new (element: HTMLElement, options: Record<string, unknown>) => StreetViewPanoramaInstance;
+  StreetViewService: new () => {
+    getPanorama: (
+      request: { location: { lat: number; lng: number }; radius: number; preference: "nearest" },
+      callback: (data: StreetViewPanoramaData | null, status: string) => void,
+    ) => Promise<unknown>;
+  };
+  StreetViewStatus: { OK: string };
+};
+type GoogleMapsNamespace = { importLibrary: (name: "streetView") => Promise<StreetViewLibrary> };
+
+declare global {
+  interface Window {
+    google?: { maps?: GoogleMapsNamespace };
+    __openlandStreetViewReady?: () => void;
+  }
+}
+
+let googleMapsLoader: Promise<GoogleMapsNamespace> | null = null;
 
 const ROOT = "https://gisservice.mt.gov/arcgis/rest/services";
 const CAD = `${ROOT}/msdi_cadastral_map_v1/MapServer`;
@@ -603,10 +625,7 @@ export default function Home() {
       </div>}
     </section>}
 
-    {streetView && googleBrowserKey && <section className="streetview-panel" aria-label={`Street View: ${streetView.label}`}>
-      <div className="streetview-bar"><div><small>GOOGLE STREET VIEW</small><b>{streetView.label}</b></div><button aria-label="Close Street View" onClick={() => setStreetView(null)}>×</button></div>
-      <iframe title={`Google Street View of ${streetView.label}`} src={`https://www.google.com/maps/embed/v1/streetview?key=${encodeURIComponent(googleBrowserKey)}&location=${streetView.lat},${streetView.lon}&fov=90&heading=0&pitch=0`} allowFullScreen loading="eager" referrerPolicy="no-referrer-when-downgrade" />
-    </section>}
+    {streetView && googleBrowserKey && <StreetViewViewer key={`${streetView.lat},${streetView.lon}`} target={streetView} apiKey={googleBrowserKey} onClose={() => setStreetView(null)} />}
 
     <nav aria-label="Primary"><button className={navTab === "explore" ? "active" : ""} onClick={() => openTab("explore")}>⌖<small>Explore</small></button><button className={navTab === "routes" ? "active" : ""} onClick={() => openTab("routes")}>↗<small>Routes</small></button><button className={navTab === "saved" ? "active" : ""} onClick={() => openTab("saved")}>☆<small>Saved</small></button><button className={navTab === "more" ? "active" : ""} onClick={() => openTab("more")}>☰<small>More</small></button></nav>
   </main>;
@@ -670,4 +689,91 @@ function Layer({ color, title, sub, on, click }: { color: string; title: string;
 
 function StreetViewIcon() {
   return <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.6" fill="currentColor"/><path d="M8.2 10.2c0-1.8 1.5-3.2 3.3-3.2h1c1.8 0 3.3 1.4 3.3 3.2v2.3l2.1 2.1-1.7 1.7-2.3-2.3v7h-3v-5.2H9.2V21h-3v-8.6h2z" fill="currentColor"/></svg>;
+}
+
+function StreetViewViewer({ target, apiKey, onClose }: { target: StreetViewTarget; apiKey: string; onClose: () => void }) {
+  const canvas = useRef<HTMLDivElement>(null);
+  const [viewerState, setViewerState] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    let panorama: StreetViewPanoramaInstance | null = null;
+    void loadGoogleMaps(apiKey)
+      .then(maps => maps.importLibrary("streetView"))
+      .then(library => {
+        if (cancelled) return;
+        const service = new library.StreetViewService();
+        void service.getPanorama(
+          { location: { lat: target.lat, lng: target.lon }, radius: 1000, preference: "nearest" },
+          (data, status) => {
+            if (cancelled) return;
+            if (status !== library.StreetViewStatus.OK || !data?.location?.pano || !canvas.current) {
+              setViewerState("unavailable");
+              return;
+            }
+            panorama = new library.StreetViewPanorama(canvas.current, {
+              pano: data.location.pano,
+              pov: { heading: 0, pitch: 0 },
+              zoom: 1,
+              addressControl: true,
+              clickToGo: true,
+              fullscreenControl: true,
+              linksControl: true,
+              motionTracking: false,
+              motionTrackingControl: false,
+              panControl: true,
+              zoomControl: true,
+            });
+            setViewerState("ready");
+          },
+        ).catch(() => {
+          if (!cancelled) setViewerState("error");
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setViewerState("error");
+      });
+
+    return () => {
+      cancelled = true;
+      panorama?.setVisible(false);
+    };
+  }, [apiKey, target.lat, target.lon]);
+
+  const googleMapsUrl = `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${target.lat},${target.lon}`;
+
+  return <section className="streetview-panel" aria-label={`Street View: ${target.label}`}>
+    <div className="streetview-bar"><div><small>GOOGLE STREET VIEW</small><b>{target.label}</b></div><a href={googleMapsUrl} target="_blank" rel="noreferrer">Open in Maps</a><button aria-label="Close Street View" onClick={onClose}>×</button></div>
+    <div className="streetview-canvas" ref={canvas} />
+    {viewerState !== "ready" && <div className="streetview-status" role="status">
+      {viewerState === "loading" ? <><i/><b>Finding nearby Street View…</b><span>Searching within 0.6 mile</span></> : <><StreetViewIcon/><b>{viewerState === "unavailable" ? "No Street View nearby" : "Street View could not load"}</b><span>{viewerState === "unavailable" ? "Try another point closer to a public road." : "Open the location in Google Maps or try again."}</span><a href={googleMapsUrl} target="_blank" rel="noreferrer">Open in Google Maps</a></>}
+    </div>}
+  </section>;
+}
+
+function loadGoogleMaps(apiKey: string) {
+  if (window.google?.maps) return Promise.resolve(window.google.maps);
+  if (googleMapsLoader) return googleMapsLoader;
+
+  googleMapsLoader = new Promise<GoogleMapsNamespace>((resolve, reject) => {
+    const script = document.createElement("script");
+    const timeout = window.setTimeout(() => reject(new Error("Google Maps timed out")), 15000);
+    const finish = () => {
+      window.clearTimeout(timeout);
+      if (window.google?.maps) resolve(window.google.maps);
+      else reject(new Error("Google Maps did not initialize"));
+    };
+
+    window.__openlandStreetViewReady = finish;
+    script.dataset.openlandGoogleMaps = "true";
+    script.async = true;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly&loading=async&callback=__openlandStreetViewReady`;
+    script.onerror = () => {
+      window.clearTimeout(timeout);
+      reject(new Error("Google Maps failed to load"));
+    };
+    document.head.appendChild(script);
+  });
+
+  return googleMapsLoader;
 }
