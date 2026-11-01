@@ -1,64 +1,92 @@
 /**
- * POST /api/ai/prospect: describe the aerial photo and nearby USGS records for one point.
+ * POST /api/ai/prospect: upstream gold evidence for a point, plus an optional AI photo read.
  *
- * The model only describes what it can see. It is never asked whether digging
- * or staking is legal, never asked for a grade, and never asked for a claim
- * value; land status comes from the deterministic checks in
- * app/lib/land-status.ts. The caller must send their own Gemini key: there is
+ * Always returns the deterministic USGS evidence from app/lib/geologist.ts
+ * (mines in the creek's upstream basin, creek gradient, elevation); no key
+ * needed. If the caller sends their own Gemini key, Gemini also describes a
+ * 2025 NAIP aerial photo centred on the point, as structured JSON. The model
+ * never decides legality, grades the spot, or prices a claim. There is
  * deliberately no server-key fallback until this route has auth and rate limits.
  */
 import { NextResponse } from "next/server";
+import { formatEvidence, upstreamEvidence, type UpstreamEvidence } from "../../../lib/geologist";
 import { NAIP_2025_URL, feetPerDegree } from "../../../lib/land-status";
 import { rejectCrossSite } from "../../../lib/same-origin";
 
 /** Listed on ai.google.dev/gemini-api/docs/models as of 2026-11-01. */
 const MODEL = "gemini-3.8-flash";
+/** Half-width of the aerial image in metres (the image covers about 300 m × 300 m). */
+const IMAGE_HALF_WIDTH_M = 150;
 
-type Mine = { name?: unknown; status?: unknown; commodities?: unknown; distanceMiles?: unknown; lon?: unknown; lat?: unknown };
-type Body = { lon?: unknown; lat?: unknown; mines?: unknown; bends?: unknown; apiKey?: unknown };
+type Body = { lon?: unknown; lat?: unknown; apiKey?: unknown };
 type Part = { text: string } | { inlineData: { mimeType: string; data: string } };
 type GeminiResponse = {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
   error?: { message?: string };
 };
+type PhotoRead = { photo?: string; where_to_look?: string[]; unknowns?: string[]; image_quality?: string };
 
 const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
 
-/** USGS 3DEP point elevation in feet, or null if unavailable or out of a plausible range. */
-async function getElevationFt(lon: number, lat: number): Promise<number | null> {
-  try {
-    const res = await fetch(`https://epqs.nationalmap.gov/v1/json?x=${lon}&y=${lat}&wkid=4326&units=Feet&includeDate=false`);
-    if (!res.ok) return null;
-    const value = Number(((await res.json()) as { value?: unknown }).value);
-    return Number.isFinite(value) && value > -1000 && value < 20000 ? Math.round(value) : null;
-  } catch {
-    return null;
-  }
-}
+/** Gemini response schema (OpenAPI subset, as in the generateContent reference). */
+const PHOTO_SCHEMA = {
+  type: "object",
+  properties: {
+    photo: { type: "string", description: "What is visible: stream channel, gravel bars, exposed bedrock, old workings or tailings, roads or pull-offs, vegetation. Say plainly if unclear." },
+    where_to_look: { type: "array", items: { type: "string" }, description: "Up to 3 places a beginner could look first, each tied to something visible in the photo. Empty if nothing is visible." },
+    unknowns: { type: "array", items: { type: "string" }, description: "The biggest things this photo and data cannot tell you." },
+    image_quality: { type: "string", description: "good, fair or poor" },
+  },
+  required: ["photo", "where_to_look", "unknowns", "image_quality"],
+};
 
-/** Half-width of the aerial image in metres (the image covers about 300 m × 300 m). */
-const IMAGE_HALF_WIDTH_M = 150;
-
-/**
- * A 512 px 2025 NAIP aerial image (USDA imagery, ~0.3 m/pixel, served by the
- * Montana State Library) centred on the point, or null.
- */
-async function getTile(lon: number, lat: number): Promise<{ mimeType: string; data: string } | null> {
+/** A 512 px 2025 NAIP aerial image (USDA, ~0.3 m/pixel, Montana State Library) centred on the point, or null. */
+async function getAerial(lon: number, lat: number): Promise<{ mimeType: string; data: string } | null> {
   const k = feetPerDegree(lat);
-  const dLat = (IMAGE_HALF_WIDTH_M / 0.3048) / k.lat;
-  const dLon = (IMAGE_HALF_WIDTH_M / 0.3048) / k.lon;
+  const dLat = IMAGE_HALF_WIDTH_M / 0.3048 / k.lat;
+  const dLon = IMAGE_HALF_WIDTH_M / 0.3048 / k.lon;
   const params = new URLSearchParams({
     bbox: `${lon - dLon},${lat - dLat},${lon + dLon},${lat + dLat}`,
     bboxSR: "4326", imageSR: "3857", size: "512,512", format: "jpg", f: "image",
   });
   try {
-    const res = await fetch(`${NAIP_2025_URL}/exportImage?${params}`);
+    const res = await fetch(`${NAIP_2025_URL}/exportImage?${params}`, { signal: AbortSignal.timeout(15000) });
     const mimeType = res.headers.get("content-type")?.split(";")[0].trim() ?? "";
     if (!res.ok || !mimeType.startsWith("image/")) return null;
     return { mimeType, data: Buffer.from(await res.arrayBuffer()).toString("base64") };
   } catch {
     return null;
   }
+}
+
+/** Facts the model may use, stated so it can't mistake them for a verdict. */
+function evidenceForPrompt(e: UpstreamEvidence): string {
+  const g = e.gradient;
+  return [
+    `Upstream USGS mineral records (inside this creek's drainage basin): evidence level "${e.level}"; past-producing gold mines: ${e.producers.join(", ") || "none"}; gold prospects: ${e.prospects.join(", ") || "none"}.`,
+    g ? `Creek slope: ${g.upstreamPct.toFixed(1)}% just upstream, ${g.downstreamPct.toFixed(1)}% just downstream${g.flattens ? " (flattens here)" : ""}.` : "Creek slope: not measured.",
+  ].join(" ");
+}
+
+/** Format the model's structured photo read; falls back to its raw text if it isn't valid JSON. */
+function formatPhotoRead(text: string): string {
+  let read: PhotoRead | null = null;
+  try {
+    read = JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "")) as PhotoRead;
+  } catch {
+    read = null;
+  }
+  const bullets = (items?: string[]) => (items?.length ? items.slice(0, 4).map(i => `  • ${i}`).join("\n") : "  • (nothing stated)");
+  if (!read || typeof read.photo !== "string") return `🤖 AI PHOTO READ (Gemini · 2025 NAIP aerial)\n${text}`;
+  return [
+    "🤖 AI PHOTO READ (Gemini · 2025 NAIP aerial, centred on your spot)",
+    `What the photo shows: ${read.photo}`,
+    "Where to look first (only if the land check says it's open):",
+    bullets(read.where_to_look),
+    "What this can't tell you:",
+    bullets(read.unknowns),
+    `Image quality: ${read.image_quality ?? "not stated"}`,
+  ].join("\n");
 }
 
 export async function POST(req: Request) {
@@ -77,67 +105,42 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "lat and lon must be numbers inside Montana" }, { status: 400 });
   }
   const key = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
-  if (!key) return NextResponse.json({ error: "MISSING_KEY" }, { status: 400 });
 
-  const mines = (Array.isArray(body.mines) ? (body.mines as Mine[]) : []).slice(0, 3).flatMap(m => {
-    const mLon = num(m.lon);
-    const mLat = num(m.lat);
-    if (mLon === null || mLat === null) return [];
-    return [{
-      name: String(m.name ?? "Unnamed").slice(0, 80),
-      status: String(m.status ?? "").slice(0, 40),
-      commodities: Array.isArray(m.commodities) ? m.commodities.map(String).slice(0, 4).join("/") : "",
-      distanceMiles: num(m.distanceMiles),
-      lon: mLon,
-      lat: mLat,
-    }];
-  });
-  const bends = typeof body.bends === "string" ? body.bends.slice(0, 600) : "";
-
-  const [spotElev, tile, ...mineElevs] = await Promise.all([
-    getElevationFt(lon, lat),
-    getTile(lon, lat),
-    ...mines.map(m => getElevationFt(m.lon, m.lat)),
-  ]);
-  const mineSummary = mines.map((m, i) => {
-    const elev = mineElevs[i] as number | null;
-    const relative = elev !== null && spotElev !== null
-      ? `${Math.abs(elev - spotElev)} ft ${elev > spotElev ? "higher" : "lower"} than this spot`
-      : "elevation unknown";
-    return `${m.name} (${m.commodities || m.status || "commodity not listed"}, ${m.distanceMiles ?? "?"} mi away, ${relative}; same drainage NOT checked)`;
-  }).join("; ");
+  const [evidence, aerial] = await Promise.all([upstreamEvidence(lon, lat), key ? getAerial(lon, lat) : Promise.resolve(null)]);
+  const evidenceText = formatEvidence(evidence);
+  if (!key) {
+    return NextResponse.json({ report: `${evidenceText}\n\n🔑 Add your Gemini key for an AI read of the 2025 aerial photo of this spot.`, evidence });
+  }
 
   const prompt = [
-    `You are a careful field geologist describing a Montana location for a beginner gold panner. Point: ${lat.toFixed(5)}, ${lon.toFixed(5)}, elevation ${spotElev ?? "unknown"} ft.`,
-    tile
-      ? "The attached image is a 2025 summer aerial photo (USDA NAIP), about 300 m across, centred exactly on the point. North is up."
-      : "No aerial image was available.",
-    `Nearby USGS mineral records (straight-line distance; whether they drain to this creek has NOT been checked): ${mineSummary || "none"}.`,
-    `Candidate creek bends from USGS stream lines: ${bends || "none"}.`,
-    "Reply in 3 short sections:",
-    "1. WHAT THE PHOTO SHOWS: channel, gravel bars, exposed bedrock, old workings or tailings, roads or pull-offs, vegetation. Say plainly if the image is unclear.",
-    "2. WHERE A BEGINNER COULD LOOK FIRST, IF THE APP'S LAND CHECK SAYS IT IS OPEN: inside bends, bar heads, bedrock cracks, behind boulders. Tie each to something visible, or say nothing is visible.",
-    "3. WHAT THIS CAN'T TELL YOU: the biggest unknowns.",
-    "Do NOT say whether digging, panning or staking is legal. Do NOT grade the spot. Do NOT estimate claim value or a sale price. Land status is checked separately by the app.",
+    `You are a careful field geologist helping a beginner gold panner in Montana. Point: ${lat.toFixed(5)}, ${lon.toFixed(5)}.`,
+    aerial ? "The attached image is a 2025 summer aerial photo (USDA NAIP), about 300 m across, centred exactly on the point. North is up." : "No aerial image was available; say so in 'photo'.",
+    `Known facts from USGS records (already computed; do not restate them as your own conclusions): ${evidenceForPrompt(evidence)}`,
+    "Describe only what the photo shows and where a beginner could look first if the land is open: inside bends, the upstream end of gravel bars, bedrock cracks, behind boulders.",
+    "Do NOT say whether digging, panning or staking is legal. Do NOT grade the spot. Do NOT estimate claim value or a sale price.",
   ].join("\n");
-
   const parts: Part[] = [{ text: prompt }];
-  if (tile) parts.push({ inlineData: tile });
+  if (aerial) parts.push({ inlineData: aerial });
 
   try {
     const gRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      body: JSON.stringify({ contents: [{ parts }] }),
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: { responseMimeType: "application/json", responseSchema: PHOTO_SCHEMA },
+      }),
+      signal: AbortSignal.timeout(45000),
     });
     const gData = (await gRes.json()) as GeminiResponse;
     const text = gData.candidates?.[0]?.content?.parts?.map(p => p.text ?? "").join("").trim();
     if (!gRes.ok || !text) {
-      return NextResponse.json({ error: gData.error?.message || `Gemini error ${gRes.status}` }, { status: gRes.ok ? 502 : gRes.status });
+      const reason = gData.error?.message || `Gemini error ${gRes.status}`;
+      return NextResponse.json({ report: `${evidenceText}\n\n🤖 AI photo read unavailable: ${reason}`, evidence });
     }
-    const header = `⛰️ USGS ELEVATION: ${spotElev ?? "?"} ft\n📍 NEARBY USGS RECORDS: ${mineSummary || "none"}\n\n`;
-    return NextResponse.json({ report: header + text, spotElev });
+    return NextResponse.json({ report: `${evidenceText}\n\n${formatPhotoRead(text)}`, evidence });
   } catch (e) {
-    return NextResponse.json({ error: e instanceof Error ? e.message : "AI request failed" }, { status: 502 });
+    const reason = e instanceof Error ? e.message : "request failed";
+    return NextResponse.json({ report: `${evidenceText}\n\n🤖 AI photo read unavailable: ${reason}`, evidence });
   }
 }
