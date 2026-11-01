@@ -1,3 +1,5 @@
+import { rejectCrossSite } from "../../../lib/same-origin";
+
 type GooglePlace = {
   id?: string;
   displayName?: { text?: string };
@@ -13,6 +15,8 @@ type GooglePlace = {
 };
 
 export async function GET(request: Request) {
+  const blocked = rejectCrossSite(request);
+  if (blocked) return blocked;
   const key = process.env.GOOGLE_MAPS_SERVER_KEY;
   const url = new URL(request.url);
   const query = url.searchParams.get("q")?.trim();

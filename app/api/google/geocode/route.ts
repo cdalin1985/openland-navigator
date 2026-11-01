@@ -1,4 +1,8 @@
+import { rejectCrossSite } from "../../../lib/same-origin";
+
 export async function GET(request: Request) {
+  const blocked = rejectCrossSite(request);
+  if (blocked) return blocked;
   const key = process.env.GOOGLE_MAPS_SERVER_KEY;
   const query = new URL(request.url).searchParams.get("q")?.trim();
 
