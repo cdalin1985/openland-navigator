@@ -66,9 +66,6 @@ const VERDICT_BG: Record<Verdict["tone"], string> = { unknown: "#7c2d12", no: "#
 const NUDGES: Array<[string, number, number]> = [["⬅️", -100, 0], ["⬆️", 0, 100], ["⬇️", 0, -100], ["➡️", 100, 0]];
 const MRDS = "https://services.arcgis.com/v01gqwM5QqNysAAi/ArcGIS/rest/services/Mineral_Resources_Data_System_MRDS_Compact_Version/FeatureServer";
 const GEONAMES = "https://carto.nationalmap.gov/arcgis/rest/services/geonames/MapServer";
-const TRANSPORTATION = "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer";
-const REFERENCE_LABELS = "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Reference_Overlay/MapServer";
-const HYDRO_LABELS = "https://tiles.arcgis.com/tiles/P3ePLMYs2RVChkJx/arcgis/rest/services/Esri_Hydro_Reference_Overlay/MapServer";
 const money = (n?: number) => n ? `$${n.toLocaleString()}` : "Not listed";
 
 
@@ -168,24 +165,23 @@ export default function Home() {
       // No stream data: show no bend suggestions. Nothing here makes a legal claim.
     }
   }
+  /**
+   * Upstream gold check for the tapped point. The server works out the
+   * evidence from USGS records itself (no key needed); a Gemini key, if set,
+   * adds an AI read of the aerial photo.
+   */
   async function runAiGeologist() {
     if (!clickedLocation) return;
-    if (!geminiKey.trim()) { setKeyBoxOpen(true); return; }
     const seq = inspectSeq.current;
     setAiLoading(true); setAiReport(""); setKeyBoxOpen(false);
     try {
       const res = await fetch("/api/ai/prospect", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          lon: clickedLocation.lon, lat: clickedLocation.lat,
-          mines: (minerals?.records || []).map(m => ({ name: m.name, status: m.status, commodities: m.commodities, distanceMiles: m.distanceMiles, lon: m.lon, lat: m.lat })),
-          bends: digSpots.map(s => `${s.name} ~${Math.round(s.turnDeg)}° bend, inside bank ${s.insideSide}, at ${s.lat.toFixed(5)},${s.lon.toFixed(5)}`).join("; "),
-          apiKey: geminiKey.trim(),
-        }),
+        body: JSON.stringify({ lon: clickedLocation.lon, lat: clickedLocation.lat, apiKey: geminiKey.trim() || undefined }),
       });
       const d = await res.json() as { report?: string; error?: string };
       if (seq === inspectSeq.current) setAiReport(d.report || d.error || "No response");
-    } catch { if (seq === inspectSeq.current) setAiReport("AI request failed."); } finally { setAiLoading(false); }
+    } catch { if (seq === inspectSeq.current) setAiReport("Upstream check failed. Try again."); } finally { setAiLoading(false); }
   }
   /** Load USGS MRDS records within 10 miles, nearest first, with their commodities. */
   async function loadMinerals(lon: number, lat: number, signal: AbortSignal, isCurrent: () => boolean) {
@@ -361,31 +357,29 @@ export default function Home() {
     const claims = new ImageLayer({
       className: "ol-layer ol-active-claims", source: new ImageArcGISRest({ url: CLAIMS, params: { LAYERS: "show:0", FORMAT: "png32" }, attributions: blmCredit }), opacity: .82 });
     const parcels = new ImageLayer({ source: new ImageArcGISRest({ url: CAD, params: { LAYERS: "show:1", FORMAT: "png32" }, attributions: cadastralCredit }), opacity: .9, minZoom: 9, visible: false });
-    const lowZoomReference = new TileLayer({
-      source: new XYZ({
-        url: `${REFERENCE_LABELS}/tile/{z}/{y}/{x}`,
-        maxZoom: 13,
-        crossOrigin: "anonymous",
-        attributions: "Esri World Reference Overlay",
+    const lowZoomReference = new ImageLayer({
+      source: new ImageArcGISRest({
+        url: GEONAMES,
+        params: { LAYERS: "show:1,2,3", FORMAT: "png32", TRANSPARENT: true, DPI: 144 },
+        attributions: "USGS Geographic Names Information System",
       }),
-      maxZoom: 11,
+      minZoom: 6,
     });
     const hydroLabels = new TileLayer({
       source: new XYZ({
-        url: `${HYDRO_LABELS}/tile/{z}/{y}/{x}`,
-        maxZoom: 19,
+        url: "https://basemap.nationalmap.gov/arcgis/rest/services/USGSHydroCached/MapServer/tile/{z}/{y}/{x}",
+        maxZoom: 16,
         crossOrigin: "anonymous",
-        attributions: "Esri Hydro Reference Overlay",
+        attributions: "USGS The National Map: National Hydrography Dataset",
       }),
       opacity: .9,
       minZoom: 8,
     });
-    const roadLabels = new TileLayer({
-      source: new XYZ({
-        url: `${TRANSPORTATION}/tile/{z}/{y}/{x}`,
-        maxZoom: 23,
-        crossOrigin: "anonymous",
-        attributions: "Esri World Transportation",
+    const roadLabels = new ImageLayer({
+      source: new ImageArcGISRest({
+        url: "https://carto.nationalmap.gov/arcgis/rest/services/transportation/MapServer",
+        params: { FORMAT: "png32", TRANSPARENT: true, DPI: 144 },
+        attributions: "USGS The National Map: National Transportation Dataset",
       }),
       minZoom: 6,
     });
@@ -401,7 +395,7 @@ export default function Home() {
       source: new ImageArcGISRest({
         url: GEONAMES,
         params: {
-          LAYERS: "show:1,2,3,5,6,7,10",
+          LAYERS: "show:5,6,7,10",
           FORMAT: "png32",
           TRANSPARENT: true,
           DPI: 144,
@@ -1039,7 +1033,7 @@ export default function Home() {
               <div style={{ marginTop: "8px", background: "rgba(30, 27, 75, 0.85)", padding: "9px", borderRadius: "8px", border: "1px solid #818cf8" }}>
                 <div style={{ display: "flex", gap: "6px" }}>
                   <button onClick={runAiGeologist} style={{ flex: 1, background: "linear-gradient(135deg, #6366f1, #4f46e5)", color: "#fff", border: "1px solid #a5b4fc", borderRadius: "6px", padding: "7px 10px", fontSize: "11px", fontWeight: 900, cursor: "pointer" }}>
-                    {aiLoading ? "🤖 Analyzing Aerial Photo & USGS Elevations…" : "🤖 Ask AI Geologist (Vision + Elevation)"}
+                    {aiLoading ? "🧭 Checking the creek's upstream drainage…" : "🧭 Upstream gold check (+ AI photo read with key)"}
                   </button>
                   <button onClick={() => setKeyBoxOpen(!keyBoxOpen)} title="Set Gemini API Key" style={{ background: "rgba(255,255,255,0.1)", border: "1px solid #818cf8", color: "#fff", borderRadius: "6px", padding: "0 8px", cursor: "pointer" }}>🔑</button>
                 </div>
@@ -1049,7 +1043,7 @@ export default function Home() {
                     <button onClick={runAiGeologist} style={{ background: "#22c55e", color: "#000", border: "none", borderRadius: "4px", padding: "5px 8px", fontSize: "11px", fontWeight: 800, cursor: "pointer" }}>Go</button>
                   </div>
                 )}
-                {aiReport && <div style={{ marginTop: "8px", fontSize: "11px", lineHeight: "1.45", color: "#e0e7ff", whiteSpace: "pre-wrap", maxHeight: "240px", overflowY: "auto", background: "rgba(0,0,0,0.4)", padding: "8px", borderRadius: "6px" }}>{aiReport}{"\n\n— AI description of the photo and nearby records. Not a legal opinion or an assay."}</div>}
+                {aiReport && <div style={{ marginTop: "8px", fontSize: "11px", lineHeight: "1.45", color: "#e0e7ff", whiteSpace: "pre-wrap", maxHeight: "240px", overflowY: "auto", background: "rgba(0,0,0,0.4)", padding: "8px", borderRadius: "6px" }}>{aiReport}{"\n\n— Evidence from USGS records and, if shown, an AI description of the photo. Not a legal opinion or an assay."}</div>}
               </div>
             )}
             {digSpots.length > 0 && (

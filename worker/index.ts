@@ -6,7 +6,6 @@ interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
   GOOGLE_MAPS_BROWSER_KEY?: string;
-  GOOGLE_MAPS_SERVER_KEY?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -29,8 +28,7 @@ interface ExecutionContext {
 
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    if (env.GOOGLE_MAPS_BROWSER_KEY) process.env.GOOGLE_MAPS_BROWSER_KEY = env.GOOGLE_MAPS_BROWSER_KEY;
-    if (env.GOOGLE_MAPS_SERVER_KEY) process.env.GOOGLE_MAPS_SERVER_KEY = env.GOOGLE_MAPS_SERVER_KEY;
+    if (env?.GOOGLE_MAPS_BROWSER_KEY) process.env.GOOGLE_MAPS_BROWSER_KEY = env.GOOGLE_MAPS_BROWSER_KEY;
     const url = new URL(request.url);
 
     if (url.pathname === "/_vinext/image") {
