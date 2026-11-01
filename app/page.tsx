@@ -20,10 +20,13 @@ import Attribution from "ol/control/Attribution";
 import type BaseLayer from "ol/layer/Base";
 import {
   CADASTRAL_URL as CAD, CLAIMS_CLOSED_URL as CLAIMS_CLOSED, CLAIMS_URL as CLAIMS, CLAIM_SHAPES, NHD_FLOWLINE_URL,
-  aliquotHalves, arcgisFeatures, buildStakingPacket, checkLandAt, distanceMiles, findBendSpots, landVerdict, offsetByFeet,
+  aliquotHalves, arcgisFeatures, buildStakingPacket, distanceMiles, findBendSpots, landVerdict, offsetByFeet,
   ringAcres, stakeBoxCorners, surveyUnitAt,
   type Attributes, type BendSpot, type ClaimKind, type Half, type LandCheck, type SurveyUnit, type Verdict,
 } from "./lib/land-status";
+import { checkLandSmart, loadAllAreas, offlineFlowlines, type BBox } from "./lib/offline";
+import OfflineAreas from "./components/OfflineAreas";
+import Polygon from "ol/geom/Polygon";
 
 const HALF_LABEL: Record<Half, string> = { N: "N½", S: "S½", E: "E½", W: "W½" };
 type StakeSnap = { half: Half; description: string; acres: number };
@@ -87,6 +90,8 @@ export default function Home() {
   const target = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
   const vectors = useRef(new VectorSource());
+  const offlineSource = useRef(new VectorSource());
+  const [isOffline, setIsOffline] = useState(false);
   const overlays = useRef<Record<string, BaseLayer>>({});
   const inspectRef = useRef<((lon: number, lat: number) => void) | null>(null);
   const labelLayers = useRef<Array<ImageLayer<ImageArcGISRest> | TileLayer<XYZ>>>([]);
@@ -152,13 +157,19 @@ export default function Home() {
     vectors.current.getFeatures().filter(f => f.get("kind") === "digSpot").forEach(f => vectors.current.removeFeature(f));
     try {
       const q = new URLSearchParams({ f: "json", geometry: `${lon},${lat}`, geometryType: "esriGeometryPoint", inSR: "4326", outSR: "4326", spatialRel: "esriSpatialRelIntersects", distance: "500", units: "esriSRUnit_Meter", outFields: "gnis_name,ftype", returnGeometry: "true" });
-      const spots = findBendSpots(await arcgisFeatures(`${NHD_FLOWLINE_URL}/query?${q}`, signal), lon, lat);
+      // Online stream lines first; with no signal, the stream lines saved with an offline area.
+      const flowlines = await arcgisFeatures(`${NHD_FLOWLINE_URL}/query?${q}`, signal).catch(async error => {
+        const saved = await offlineFlowlines(lon, lat);
+        if (!saved) throw error;
+        return saved;
+      });
+      const spots = findBendSpots(flowlines, lon, lat);
       if (!isCurrent()) return;
       spots.forEach(s => { const p = new Feature(new Point(fromLonLat([s.lon, s.lat]))); p.set("kind", "digSpot"); vectors.current.addFeature(p); });
       setDigSpots(spots);
       const verdicts: Verdict[] = [];
       // One spot at a time to stay gentle on BLM's server.
-      for (const s of spots) verdicts.push(landVerdict((await checkLandAt(s.lon, s.lat, signal)).check));
+      for (const s of spots) verdicts.push(landVerdict((await checkLandSmart(s.lon, s.lat, signal)).check));
       if (!isCurrent()) return;
       setDigSpots(spots.map((s, i) => ({ ...s, verdict: verdicts[i] })));
     } catch {
@@ -279,7 +290,7 @@ export default function Home() {
       const results: Array<{ label: string; verdict: Verdict }> = [];
       for (const [label, [lon, lat]] of points) {
         if (seq !== stakeSeq.current) return;
-        results.push({ label, verdict: landVerdict((await checkLandAt(lon, lat)).check) });
+        results.push({ label, verdict: landVerdict((await checkLandSmart(lon, lat)).check) });
       }
       if (seq === stakeSeq.current) setStakeChecks(results);
     }, 700);
@@ -416,10 +427,17 @@ export default function Home() {
           })
         : new Style({ image: new Circle({ radius: 9, fill: new Fill({ color: "#62f3aa" }), stroke: new Stroke({ color: "#fff", width: 4 }) }) }),
     });
+    // Saved claims and closures, drawn only while offline (the live map layers can't load then).
+    const offlineLayer = new VectorLayer({
+      source: offlineSource.current,
+      style: f => f.get("kind") === "offlineClaim"
+        ? new Style({ stroke: new Stroke({ color: "#ff00b7", width: 2 }), fill: new Fill({ color: "rgba(255,0,183,0.10)" }) })
+        : new Style({ stroke: new Stroke({ color: "#ef4444", width: 2, lineDash: [6, 4] }), fill: new Fill({ color: "rgba(239,68,68,0.08)" }) }),
+    });
     const instance = new Map({
       target: target.current,
       controls: [new Attribution({ collapsible: false })],
-      layers: [usgsImagery, naip, topo, publicLand, easements, claims, closedClaims, parcels, lowZoomReference, hydroLabels, roadLabels, mvum, geographicNames, vector],
+      layers: [usgsImagery, naip, topo, publicLand, easements, claims, closedClaims, parcels, lowZoomReference, hydroLabels, roadLabels, mvum, geographicNames, offlineLayer, vector],
       view: new View({ center: fromLonLat([-112.035, 46.685]), zoom: 11.2, minZoom: 5, maxZoom: 20 }),
     });
     const runInspect = async (lon: number, lat: number) => {
@@ -451,7 +469,7 @@ export default function Home() {
       void loadMinerals(lon, lat, controller.signal, isCurrent);
       void findDigSpots(lon, lat, controller.signal, isCurrent);
 
-      const { check, parcel: parcelAttrs, publicOwner, active, closed } = await checkLandAt(lon, lat, controller.signal);
+      const { check, parcel: parcelAttrs, publicOwner, active, closed } = await checkLandSmart(lon, lat, controller.signal);
       if (!isCurrent()) return;
       const activeList = active.map(normClaim);
       setActiveClaimsList(activeList);
@@ -520,6 +538,45 @@ export default function Home() {
     baseLayers.current.google?.setVisible(base === "google");
     googleCopyright.current?.();
   }, [base, googleMaps]);
+
+  // Offline support: register the service worker (caches the app and saved USGS tiles) and track connectivity.
+  useEffect(() => {
+    if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    const update = () => setIsOffline(!navigator.onLine);
+    const timer = window.setTimeout(update, 0);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => { window.clearTimeout(timer); window.removeEventListener("online", update); window.removeEventListener("offline", update); };
+  }, []);
+
+  // While offline, draw the saved claims and closures from every saved area.
+  useEffect(() => {
+    const source = offlineSource.current;
+    source.clear();
+    if (!isOffline) return;
+    let cancelled = false;
+    void loadAllAreas().then(areas => {
+      if (cancelled) return;
+      const add = (rings: number[][][], kind: string) => {
+        const feature = new Feature(new Polygon(rings.map(ring => ring.map(([x, y]) => fromLonLat([x, y])))));
+        feature.set("kind", kind);
+        source.addFeature(feature);
+      };
+      for (const area of areas) {
+        area.layers.active.forEach(f => add(f.g, "offlineClaim"));
+        area.layers.wilderness.forEach(f => add(f.g, "offlineClosure"));
+        area.layers.withdrawals.filter(f => /\bLOCATABLE\b|\bALL\b/i.test(String(f.a.SEG_MIN ?? ""))).forEach(f => add(f.g, "offlineClosure"));
+      }
+    });
+    return () => { cancelled = true; };
+  }, [isOffline]);
+
+  /** The current map view as [minLon, minLat, maxLon, maxLat]. */
+  function viewBBox(): BBox | null {
+    if (!map.current) return null;
+    const [minLon, minLat, maxLon, maxLat] = transformExtent(map.current.getView().calculateExtent(map.current.getSize()), "EPSG:3857", "EPSG:4326");
+    return [minLon, minLat, maxLon, maxLat];
+  }
 
   
   /** List closed BLM claims in the current view. A failed lookup is shown as a failure, never as "none". */
@@ -942,7 +999,7 @@ export default function Home() {
       <form onSubmit={search}><span>⌕</span><input aria-label="Search" placeholder="Where to? Address, place or coordinates" value={query} onChange={e => setQuery(e.target.value)} /><button>{busy ? "…" : "Go"}</button></form>
       <button className="icon" aria-label="Layers" onClick={() => { setNavTab("explore"); setLayers(v => !v); }}>▱</button>
     </header>
-    <div className="live"><i/> LIVE PUBLIC DATA · MONTANA · {base === "usgs" ? "USGS IMAGERY" : base === "topo" ? "USGS TOPO" : "GOOGLE MAPS"}</div>
+    <div className="live"><i/> {isOffline ? "📴 OFFLINE · USING SAVED AREAS" : <>LIVE PUBLIC DATA · MONTANA · {base === "usgs" ? "USGS IMAGERY" : base === "topo" ? "USGS TOPO" : "GOOGLE MAPS"}</>}</div>
     <div className="tools"><button aria-label="My location" onClick={locate}>⌾</button><button aria-label="Zoom in" onClick={() => map.current?.getView().adjustZoom(1)}>＋</button><button aria-label="Zoom out" onClick={() => map.current?.getView().adjustZoom(-1)}>−</button></div>
 
     {layers && <aside className="panel layer-panel">
@@ -1179,7 +1236,11 @@ export default function Home() {
       </div>}
       {navTab === "more" && <div className="tab-content">
         <div className="quick-grid"><button onClick={() => { openTab("explore"); locate(); }}><b>⌾</b><span>My location</span></button><button onClick={() => { openTab("explore"); setLayers(true); }}><b>▱</b><span>Map layers</span></button><button onClick={() => { setBase(base === "usgs" ? "topo" : base === "topo" && googleMaps ? "google" : "usgs"); openTab("explore"); }}><b>◫</b><span>{base === "usgs" ? "Topo map" : base === "topo" && googleMaps ? "Google satellite" : "USGS satellite"}</span></button><button onClick={clearMap}><b>⌫</b><span>Clear destination</span></button></div>
-        <div className="about-card"><small>DATA SOURCES</small><p>Google Maps, Montana State Library cadastral data, BLM MLRS active claims, USGS GNIS geographic names, USGS transportation, and USGS mineral records.</p></div>
+        <OfflineAreas
+          getViewBBox={viewBBox}
+          onGoTo={bbox => map.current?.getView().fit(transformExtent(bbox, "EPSG:4326", "EPSG:3857"), { duration: 600, padding: [40, 40, 40, 40] })}
+        />
+        <div className="about-card"><small>DATA SOURCES</small><p>USGS The National Map (imagery, topo, hydrography, transportation, GNIS names, 3DEP elevation, NLDI stream network, mineral records), 2025 Montana NAIP, Montana State Library cadastral data, BLM MLRS claims and withdrawals, USFS wilderness and Motor Vehicle Use Map. Google satellite is optional.</p></div>
         <div className="about-card"><small>IPHONE APP</small><p>In Safari, tap Share, then <b>Add to Home Screen</b> to keep OpenLand beside your other navigation apps.</p></div>
       </div>}
     </section>}

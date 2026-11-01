@@ -54,12 +54,27 @@ export type ArcgisFeature = {
  * never mistake a failed lookup for "nothing here".
  */
 export async function arcgisFeatures(url: string, signal?: AbortSignal): Promise<ArcgisFeature[]> {
-  const res = await fetch(url, { signal });
+  const res = await fetch(url, { signal: withTimeout(signal, 12_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = (await res.json()) as { features?: ArcgisFeature[]; error?: { message?: string } };
   if (data.error) throw new Error(data.error.message || "ArcGIS query failed");
   if (!Array.isArray(data.features)) throw new Error("ArcGIS response had no features array");
   return data.features;
+}
+
+/**
+ * Combine a caller's abort signal with a timeout, so a weak cell signal fails
+ * over (to saved offline data, or "couldn't verify") instead of hanging.
+ */
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("timed out")), ms);
+  (timer as unknown as { unref?: () => void }).unref?.();
+  const forward = () => controller.abort(signal?.reason);
+  if (signal?.aborted) forward();
+  else signal?.addEventListener("abort", forward, { once: true });
+  controller.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
+  return controller.signal;
 }
 
 /** Build the query string for a point-intersect ArcGIS query in WGS84. */
@@ -168,6 +183,8 @@ export type LandCheck = {
   /** Human-readable names of lookups that failed. */
   failed: string[];
   checkedAt: string;
+  /** Set when the answer came from a saved offline area: when that data was saved. */
+  offlineSavedAt?: string;
 };
 
 export type LandLookup = {
@@ -251,8 +268,8 @@ const CLAIM_DATA_CAVEAT =
   "BLM maps claims onto quarter-section blocks and new claims can take up to 90 days to reach BLM. BLM withdrawals and USFS wilderness were checked, but temporary closures and developed recreation sites may not show. Look for corner posts and signs before you dig.";
 const CLOSURE_LOOKUPS = new Set(["BLM withdrawals", "USFS wilderness"]);
 
-/** Turn a LandCheck into the user-facing verdict. Unknown always beats open. */
-export function landVerdict(check: LandCheck): Verdict {
+/** Verdict rules shared by online and offline checks. Unknown always beats open. */
+function baseVerdict(check: LandCheck): Verdict {
   const safetyFailures = check.failed.filter(name => name !== "BLM closed claims" && !CLOSURE_LOOKUPS.has(name));
   if (check.activeClaims === null || safetyFailures.length) {
     return {
@@ -363,6 +380,17 @@ export function landVerdict(check: LandCheck): Verdict {
       };
     }
   }
+}
+
+/** Turn a LandCheck into the user-facing verdict; offline answers carry the date their data was saved. */
+export function landVerdict(check: LandCheck): Verdict {
+  const verdict = baseVerdict(check);
+  if (!check.offlineSavedAt) return verdict;
+  const saved = new Date(check.offlineSavedAt);
+  const ageDays = (Date.now() - saved.getTime()) / 86_400_000;
+  const when = saved.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  const note = `📴 Offline data saved ${when}; claims and closures may have changed since.${ageDays > 30 ? " This copy is over 30 days old, so refresh it when you have signal before relying on it." : ""}`;
+  return { ...verdict, badge: `📴 ${verdict.badge}`, detail: `${note} ${verdict.detail}`, short: `${verdict.short} (offline)` };
 }
 
 /** Great-circle distance in statute miles (haversine). */
