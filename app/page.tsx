@@ -14,9 +14,16 @@ import OSM from "ol/source/OSM";
 import XYZ from "ol/source/XYZ";
 import ImageArcGISRest from "ol/source/ImageArcGISRest";
 import VectorSource from "ol/source/Vector";
-import { fromLonLat, toLonLat } from "ol/proj";
+import { fromLonLat, toLonLat, transformExtent } from "ol/proj";
 import { Circle, Fill, Stroke, Style } from "ol/style";
 import "ol/ol.css";
+import Attribution from "ol/control/Attribution";
+import type BaseLayer from "ol/layer/Base";
+import {
+  CADASTRAL_URL as CAD, CLAIMS_CLOSED_URL as CLAIMS_CLOSED, CLAIMS_URL as CLAIMS, CLAIM_SHAPES, NHD_FLOWLINE_URL,
+  arcgisFeatures, buildStakingPacket, checkLandAt, distanceMiles, findBendSpots, landVerdict, offsetByFeet, stakeBoxCorners,
+  type Attributes, type BendSpot, type ClaimKind, type LandCheck, type Verdict,
+} from "./lib/land-status";
 
 type Parcel = {
   OwnerName?: string; AddressLine1?: string; CityStateZip?: string;
@@ -34,7 +41,7 @@ type Place = {
 };
 type MiningClaim = {
   CSE_NAME?: string; CSE_DISP?: string; BLM_PROD?: string; CSE_NR?: string;
-  LEG_CSE_NR?: string; RCRD_ACRS?: number; QLTY?: string; MC_PATENTED?: string; extraInfo?: string;
+  LEG_CSE_NR?: string; RCRD_ACRS?: number; CSE_META?: string;
 };
 type MineralRecord = {
   id: string; name: string; status: string; url: string; grade: string;
@@ -74,11 +81,10 @@ declare global {
 
 let googleMapsLoader: Promise<GoogleMapsNamespace> | null = null;
 
-const ROOT = "https://gisservice.mt.gov/arcgis/rest/services";
-const CAD = `${ROOT}/msdi_cadastral_map_v1/MapServer`;
-const NAIP = `${ROOT}/MSDI_Framework/msdi_naip2025_provisional_image_v1/ImageServer`;
-const CLAIMS = "https://nlsdbpubgis.blm.gov/arcgishub/rest/services/HUB/BLM_Natl_MLRS_Mining_Claims_Not_Closed/MapServer";
-const CLAIMS_CLOSED = "https://nlsdbpubgis.blm.gov/arcgishub/rest/services/HUB/BLM_Natl_MLRS_Mining_Claims_Closed/MapServer";
+const ESRI_IMAGERY_ATTRIBUTION = "Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community";
+const VERDICT_BG: Record<Verdict["tone"], string> = { unknown: "#7c2d12", no: "#991b1b", ask: "#9a3412", caution: "#0e7490", likely: "#a16207" };
+/** Claim-box nudge buttons: label, feet east, feet north. */
+const NUDGES: Array<[string, number, number]> = [["⬅️", -100, 0], ["⬆️", 0, 100], ["⬇️", 0, -100], ["➡️", 100, 0]];
 const MRDS = "https://services.arcgis.com/v01gqwM5QqNysAAi/ArcGIS/rest/services/Mineral_Resources_Data_System_MRDS_Compact_Version/FeatureServer";
 const GEONAMES = "https://carto.nationalmap.gov/arcgis/rest/services/geonames/MapServer";
 const TRANSPORTATION = "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer";
@@ -87,26 +93,17 @@ const HYDRO_LABELS = "https://tiles.arcgis.com/tiles/P3ePLMYs2RVChkJx/arcgis/res
 const money = (n?: number) => n ? `$${n.toLocaleString()}` : "Not listed";
 
 
-function normClaim(raw: any): MiningClaim {
-  if (!raw) return {};
-  const extras: string[] = [];
-  for (const [k, v] of Object.entries(raw)) {
-    if (v == null || v === "" || /^OBJECTID|GLOBALID|SHAPE/i.test(k)) continue;
-    if (/DATE|DT|LOC_|CLOSED|CUST|NAME|OWNER|MTR|TWP|RNG|SEC|ST_/i.test(k) && !/CSE_NAME|CASE_NAME/i.test(k)) {
-      const val = typeof v === "number" && v > 100000000000 ? new Date(v).toISOString().slice(0, 10) : String(v);
-      extras.push(k + ": " + val);
-    }
-  }
+/** Map a BLM MLRS claim record to the fields the panel shows (names checked against the live layer). */
+function normClaim(raw: Attributes): MiningClaim {
+  const s = (key: string) => (raw[key] == null || raw[key] === "" ? "" : String(raw[key]));
   return {
-    CSE_NAME: raw.CSE_NAME || raw.cse_name || raw.CASE_NAME || raw.case_name || "Unnamed Claim",
-    CSE_DISP: raw.CSE_DISP || raw.cse_disp || raw.CASE_DISP || "Recorded",
-    BLM_PROD: raw.BLM_PROD || raw.blm_prod || raw.CLAIM_TYPE || "Mining Claim",
-    CSE_NR: raw.CSE_NR || raw.cse_nr || raw.SERIAL_NR || raw.serial_nr || raw.LEG_CSE_NR || raw.leg_cse_nr || "N/A",
-    LEG_CSE_NR: raw.LEG_CSE_NR || raw.leg_cse_nr || "",
-    RCRD_ACRS: Number(raw.RCRD_ACRS ?? raw.rcrd_acrs ?? raw.ACRES ?? 0) || undefined,
-    QLTY: raw.QLTY || raw.qlty || "",
-    MC_PATENTED: raw.MC_PATENTED || raw.mc_patented || "",
-    extraInfo: extras.slice(0, 6).join(" | "),
+    CSE_NAME: s("CSE_NAME") || "Unnamed claim",
+    CSE_DISP: s("CSE_DISP") || "Not listed",
+    BLM_PROD: s("BLM_PROD") || "Mining claim",
+    CSE_NR: s("CSE_NR") || s("LEG_CSE_NR") || "N/A",
+    LEG_CSE_NR: s("LEG_CSE_NR"),
+    RCRD_ACRS: Number(raw.RCRD_ACRS) || undefined,
+    CSE_META: s("CSE_META"),
   };
 }
 
@@ -115,10 +112,15 @@ export default function Home() {
   const map = useRef<Map | null>(null);
   const streetViewModeRef = useRef(false);
   const vectors = useRef(new VectorSource());
-  const overlays = useRef<Record<string, any>>({});
+  const overlays = useRef<Record<string, BaseLayer>>({});
   const inspectRef = useRef<((lon: number, lat: number) => void) | null>(null);
   const labelLayers = useRef<Array<ImageLayer<ImageArcGISRest> | TileLayer<XYZ>>>([]);
-  const baseLayers = useRef<Record<string, any>>({});
+  const baseLayers = useRef<Record<string, BaseLayer>>({});
+  const googleCopyright = useRef<(() => void) | null>(null);
+  const inspectSeq = useRef(0);
+  const inspectAbort = useRef<AbortController | null>(null);
+  const stakeSeq = useRef(0);
+  const stakeTimer = useRef<number | undefined>(undefined);
   const [base, setBase] = useState<"satellite" | "street">("satellite");
   const [layers, setLayers] = useState(false);
   const [keyOpen, setKeyOpen] = useState(true);
@@ -130,15 +132,20 @@ export default function Home() {
   const [activeClaimsList, setActiveClaimsList] = useState<MiningClaim[]>([]);
   const [lapsedClaimsList, setLapsedClaimsList] = useState<MiningClaim[]>([]);
   const [copiedDossier, setCopiedDossier] = useState(false);
-  const [stakeCorners, setStakeCorners] = useState<string[]>([]);
+  const [stakeCorners, setStakeCorners] = useState<Array<[number, number]>>([]);
+  const [stakeCenter, setStakeCenter] = useState<{ lon: number; lat: number } | null>(null);
+  const [claimKind, setClaimKind] = useState<ClaimKind>("placer");
+  const [stakeChecks, setStakeChecks] = useState<Array<{ label: string; verdict: Verdict }> | null>(null);
+  const [stakeCopied, setStakeCopied] = useState(false);
+  const [landCheck, setLandCheck] = useState<LandCheck | null>(null);
+  const [scanError, setScanError] = useState("");
   const [stakeAngle, setStakeAngle] = useState(0);
-  const [clearSky, setClearSky] = useState(false);
   const [aiReport, setAiReport] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [geminiKey, setGeminiKey] = useState(() => typeof window !== "undefined" ? localStorage.getItem("openland-gemini-key") || "" : "");
   const [keyBoxOpen, setKeyBoxOpen] = useState(false);
   const [appMode, setAppMode] = useState<"beginner" | "staker">("beginner");
-  const [digSpots, setDigSpots] = useState<Array<{ label: string; tip: string; lon: number; lat: number }>>([]);
+  const [digSpots, setDigSpots] = useState<Array<BendSpot & { verdict?: Verdict }>>([]);
   const [scanOpen, setScanOpen] = useState(false);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanResults, setScanResults] = useState<Array<MiningClaim & { lon?: number; lat?: number }>>([]);
@@ -165,65 +172,65 @@ export default function Home() {
     catch { return []; }
   });
 
-  async function findDigSpots(lon: number, lat: number) {
+  /** Find up to 3 named-stream bends near the tap, then check land status at each spot. */
+  async function findDigSpots(lon: number, lat: number, signal: AbortSignal, isCurrent: () => boolean) {
     setDigSpots([]);
     vectors.current.getFeatures().filter(f => f.get("kind") === "digSpot").forEach(f => vectors.current.removeFeature(f));
     try {
-      const q = new URLSearchParams({ f: "json", geometry: lon + "," + lat, geometryType: "esriGeometryPoint", inSR: "4326", outSR: "4326", spatialRel: "esriSpatialRelIntersects", distance: "500", units: "esriSRUnit_Meter", outFields: "*", returnGeometry: "true" });
-      const d = await (await fetch("https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer/6/query?" + q)).json();
-      const bends: Array<{ label: string; tip: string; lon: number; lat: number; score: number }> = [];
-      for (const feat of (d.features || [])) {
-        const name = feat.attributes?.gnis_name || feat.attributes?.GNIS_NAME || "Mountain Creek";
-        for (const path of (feat.geometry?.paths || [])) {
-          for (let i = 1; i < path.length - 1; i++) {
-            const [x1, y1] = path[i - 1], [x2, y2] = path[i], [x3, y3] = path[i + 1];
-            let ang = Math.abs((Math.atan2(y3 - y2, x3 - x2) - Math.atan2(y2 - y1, x2 - x1)) * 180 / Math.PI);
-            if (ang > 180) ang = 360 - ang;
-            const dist = mineralDistanceMiles(lat, lon, y2, x2);
-            if ((feat.attributes?.gnis_name || feat.attributes?.GNIS_NAME) && ang >= 20 && dist < 0.35) {
-              bends.push({ lon: x2, lat: y2, score: ang - dist * 40, label: name + " — " + Math.round(ang) + "° Inside Bend", tip: "Water slows on the inside curve of this " + Math.round(ang) + "° bend. Pan the inside gravel bar behind cobbles & down to clay/bedrock." });
-            }
-          }
-        }
-      }
-      const top = bends.sort((a, b) => b.score - a.score).filter((b, i, arr) => arr.slice(0, i).every(p => mineralDistanceMiles(b.lat, b.lon, p.lat, p.lon) > 0.04)).slice(0, 3);
-      top.forEach(s => { const p = new Feature(new Point(fromLonLat([s.lon, s.lat]))); p.set("kind", "digSpot"); vectors.current.addFeature(p); });
-      setDigSpots(top);
-    } catch {}
+      const q = new URLSearchParams({ f: "json", geometry: `${lon},${lat}`, geometryType: "esriGeometryPoint", inSR: "4326", outSR: "4326", spatialRel: "esriSpatialRelIntersects", distance: "500", units: "esriSRUnit_Meter", outFields: "gnis_name,ftype", returnGeometry: "true" });
+      const spots = findBendSpots(await arcgisFeatures(`${NHD_FLOWLINE_URL}/query?${q}`, signal), lon, lat);
+      if (!isCurrent()) return;
+      spots.forEach(s => { const p = new Feature(new Point(fromLonLat([s.lon, s.lat]))); p.set("kind", "digSpot"); vectors.current.addFeature(p); });
+      setDigSpots(spots);
+      const verdicts: Verdict[] = [];
+      // One spot at a time to stay gentle on BLM's server.
+      for (const s of spots) verdicts.push(landVerdict((await checkLandAt(s.lon, s.lat, signal)).check));
+      if (!isCurrent()) return;
+      setDigSpots(spots.map((s, i) => ({ ...s, verdict: verdicts[i] })));
+    } catch {
+      // No stream data: show no bend suggestions. Nothing here makes a legal claim.
+    }
   }
   async function runAiGeologist() {
     if (!clickedLocation) return;
     if (!geminiKey.trim()) { setKeyBoxOpen(true); return; }
+    const seq = inspectSeq.current;
     setAiLoading(true); setAiReport(""); setKeyBoxOpen(false);
     try {
-      const res = await fetch("/api/ai/prospect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lon: clickedLocation.lon, lat: clickedLocation.lat, owner: parcel?.OwnerName, activeCount: activeClaimsList.length, lapsedNames: lapsedClaimsList.map(x => x.CSE_NAME).join(", "), mines: minerals?.records || [], bends: digSpots.map(s => s.label + " at " + s.lat.toFixed(5) + "," + s.lon.toFixed(5)).join("; "), apiKey: geminiKey.trim() }) });
-      const d = await res.json();
-      setAiReport(d.report || d.error || "No response");
-    } catch { setAiReport("AI request failed."); } finally { setAiLoading(false); }
+      const res = await fetch("/api/ai/prospect", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lon: clickedLocation.lon, lat: clickedLocation.lat,
+          mines: (minerals?.records || []).map(m => ({ name: m.name, status: m.status, commodities: m.commodities, distanceMiles: m.distanceMiles, lon: m.lon, lat: m.lat })),
+          bends: digSpots.map(s => `${s.name} ~${Math.round(s.turnDeg)}° bend, inside bank ${s.insideSide}, at ${s.lat.toFixed(5)},${s.lon.toFixed(5)}`).join("; "),
+          apiKey: geminiKey.trim(),
+        }),
+      });
+      const d = await res.json() as { report?: string; error?: string };
+      if (seq === inspectSeq.current) setAiReport(d.report || d.error || "No response");
+    } catch { if (seq === inspectSeq.current) setAiReport("AI request failed."); } finally { setAiLoading(false); }
   }
-  async function loadMinerals(lon: number, lat: number) {
+  /** Load USGS MRDS records within 10 miles, nearest first, with their commodities. */
+  async function loadMinerals(lon: number, lat: number, signal: AbortSignal, isCurrent: () => boolean) {
     try {
       const siteQuery = new URLSearchParams({
         f: "json", geometry: `${lon},${lat}`, geometryType: "esriGeometryPoint",
         inSR: "4326", spatialRel: "esriSpatialRelIntersects", distance: "10",
         units: "esriSRUnit_StatuteMile", outFields: "DEP_ID,SITE_NAME,DEV_STAT,URL,Grade",
-        returnGeometry: "true", outSR: "4326", resultRecordCount: "100",
+        // Fetch everything in range (busy districts exceed 100 records) so "nearest" really is nearest.
+        returnGeometry: "true", outSR: "4326", resultRecordCount: "2000",
       });
-      const siteResponse = await fetch(`${MRDS}/0/query?${siteQuery}`);
-      if (!siteResponse.ok) throw new Error("USGS mineral service unavailable");
-      const siteData = await siteResponse.json() as {
-        features?: Array<{ attributes?: { DEP_ID?: string; SITE_NAME?: string; DEV_STAT?: string; URL?: string; Grade?: string }; geometry?: { x?: number; y?: number } }>;
-      };
-      const nearby = (siteData.features || []).flatMap(feature => {
-        const id = feature.attributes?.DEP_ID;
+      const nearby = (await arcgisFeatures(`${MRDS}/0/query?${siteQuery}`, signal)).flatMap(feature => {
+        const a = feature.attributes ?? {};
+        const id = a.DEP_ID ? String(a.DEP_ID) : "";
         const x = feature.geometry?.x; const y = feature.geometry?.y;
-        if (!id || !Number.isFinite(x) || !Number.isFinite(y)) return [];
+        if (!id || typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) return [];
         return [{
-          id, name: feature.attributes?.SITE_NAME || "Unnamed mineral record",
-          status: feature.attributes?.DEV_STAT || "Unknown",
-          url: feature.attributes?.URL || `https://mrdata.usgs.gov/mrds/show-mrds.php?dep_id=${id}`,
-          grade: feature.attributes?.Grade || "—",
-          distanceMiles: mineralDistanceMiles(lat, lon, y as number, x as number), lon: x as number, lat: y as number }];
+          id, name: String(a.SITE_NAME || "Unnamed mineral record"),
+          status: String(a.DEV_STAT || "Unknown"),
+          url: String(a.URL || `https://mrdata.usgs.gov/mrds/show-mrds.php?dep_id=${id}`),
+          grade: String(a.Grade || "—"),
+          distanceMiles: distanceMiles(lat, lon, y, x), lon: x, lat: y }];
       }).sort((a, b) => a.distanceMiles - b.distanceMiles).slice(0, 20);
 
       const commodityMap = new globalThis.Map<string, string[]>();
@@ -233,20 +240,20 @@ export default function Home() {
           f: "json", where: `Record_ID IN (${ids})`,
           outFields: "Record_ID,Commodity_name,Importance", returnGeometry: "false", resultRecordCount: "500",
         });
-        const commodityResponse = await fetch(`${MRDS}/10/query?${commodityQuery}`);
-        if (commodityResponse.ok) {
-          const commodityData = await commodityResponse.json() as { features?: Array<{ attributes?: { Record_ID?: string; Commodity_name?: string } }> };
-          (commodityData.features || []).forEach(feature => {
+        try {
+          for (const feature of await arcgisFeatures(`${MRDS}/10/query?${commodityQuery}`, signal)) {
             const id = feature.attributes?.Record_ID; const name = feature.attributes?.Commodity_name;
-            if (!id || !name) return;
+            if (typeof id !== "string" || typeof name !== "string") continue;
             const list = commodityMap.get(id) || [];
             if (!list.includes(name)) list.push(name);
             commodityMap.set(id, list);
-          });
-        }
+          }
+        } catch { /* commodities are optional detail */ }
       }
-
-      vectors.current.getFeatures().filter(f => f.get("kind") === "mine").forEach(f => vectors.current.removeFeature(f)); nearby.slice(0, 20).forEach((r: any) => { if (r.lon && r.lat) { const mf = new Feature(new Point(fromLonLat([r.lon, r.lat]))); mf.set("kind", "mine"); vectors.current.addFeature(mf); } }); const records: MineralRecord[] = nearby.slice(0, 8).map(record => ({
+      if (!isCurrent()) return;
+      vectors.current.getFeatures().filter(f => f.get("kind") === "mine").forEach(f => vectors.current.removeFeature(f));
+      nearby.forEach(r => { const mf = new Feature(new Point(fromLonLat([r.lon, r.lat]))); mf.set("kind", "mine"); vectors.current.addFeature(mf); });
+      const records: MineralRecord[] = nearby.slice(0, 8).map(record => ({
         ...record,
         distanceMiles: Number(record.distanceMiles.toFixed(2)),
         commodities: commodityMap.get(record.id) || [],
@@ -263,10 +270,46 @@ export default function Home() {
         sourceUrl: "https://mrdata.usgs.gov/mrds/",
       });
     } catch {
-      setMineralsError("Public mineral records are temporarily unavailable");
+      if (isCurrent()) setMineralsError("Public mineral records are temporarily unavailable");
     } finally {
-      setMineralsLoading(false);
+      if (isCurrent()) setMineralsLoading(false);
     }
+  }
+
+  /** Draw the claim box, then re-check land status at its centre and corners (debounced). */
+  function redrawStakeBox(center: { lon: number; lat: number }, angleDeg: number, kind: ClaimKind) {
+    const corners = stakeBoxCorners(center, angleDeg, kind);
+    vectors.current.getFeatures().filter(f => f.get("kind") === "stakeBox").forEach(f => vectors.current.removeFeature(f));
+    const box = new Feature(new LineString([...corners, corners[0]].map(c => fromLonLat(c))));
+    box.set("kind", "stakeBox");
+    vectors.current.addFeature(box);
+    corners.forEach(c => { const pt = new Feature(new Point(fromLonLat(c))); pt.set("kind", "stakeBox"); vectors.current.addFeature(pt); });
+    setStakeCenter(center); setStakeAngle(angleDeg); setClaimKind(kind); setStakeCorners(corners);
+    setStakeChecks(null); setStakeCopied(false);
+    const seq = ++stakeSeq.current;
+    window.clearTimeout(stakeTimer.current);
+    stakeTimer.current = window.setTimeout(async () => {
+      const labels = angleDeg === 0 ? ["Corner NW", "Corner NE", "Corner SE", "Corner SW"] : ["Corner 1", "Corner 2", "Corner 3", "Corner 4"];
+      const points: Array<[string, [number, number]]> = [["Centre", [center.lon, center.lat]], ...corners.map((c, i): [string, [number, number]] => [labels[i], c])];
+      const results: Array<{ label: string; verdict: Verdict }> = [];
+      for (const [label, [lon, lat]] of points) {
+        if (seq !== stakeSeq.current) return;
+        results.push({ label, verdict: landVerdict((await checkLandAt(lon, lat)).check) });
+      }
+      if (seq === stakeSeq.current) setStakeChecks(results);
+    }, 700);
+  }
+
+  /** Copy the checklist for the box exactly as drawn now (corners, rotation, land checks). */
+  function copyStakePacket() {
+    if (!stakeCenter) return;
+    const packet = buildStakingPacket({
+      kind: claimKind, center: stakeCenter, angleDeg: stakeAngle, corners: stakeCorners,
+      county: parcel?.CountyName, legal: parcel?.LegalDescriptionShort, pointChecks: stakeChecks,
+    });
+    void navigator.clipboard.writeText(packet)
+      .then(() => { setStakeCopied(true); window.setTimeout(() => setStakeCopied(false), 3000); })
+      .catch(() => setStakeCopied(false));
   }
 
   useEffect(() => {
@@ -277,24 +320,28 @@ export default function Home() {
         url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         maxZoom: 19,
         crossOrigin: "anonymous",
+        attributions: ESRI_IMAGERY_ATTRIBUTION,
       }),
       visible: true,
     });
     baseLayers.current = { streetFallback, satelliteFallback };
-    const publicLand = new ImageLayer({ source: new ImageArcGISRest({ url: CAD, params: { LAYERS: "show:2", FORMAT: "png32" } }), opacity: .5 });
-    const easements = new ImageLayer({ source: new ImageArcGISRest({ url: CAD, params: { LAYERS: "show:3", FORMAT: "png32" } }), opacity: .55, visible: false });
+    const cadastralCredit = "Montana State Library (MSDI Cadastral)";
+    const blmCredit = "BLM Mineral & Land Records System";
+    const publicLand = new ImageLayer({ source: new ImageArcGISRest({ url: CAD, params: { LAYERS: "show:2", FORMAT: "png32" }, attributions: cadastralCredit }), opacity: .5 });
+    const easements = new ImageLayer({ source: new ImageArcGISRest({ url: CAD, params: { LAYERS: "show:0", FORMAT: "png32" }, attributions: cadastralCredit }), opacity: .55, visible: false });
     const closedClaims = new ImageLayer({
       className: "ol-layer ol-lapsed-claims",
       source: new ImageArcGISRest({
         url: CLAIMS_CLOSED,
         params: { LAYERS: "show:0", FORMAT: "png32" },
+        attributions: blmCredit,
       }),
       opacity: 0.85,
       visible: true,
     });
     const claims = new ImageLayer({
-      className: "ol-layer ol-active-claims", source: new ImageArcGISRest({ url: CLAIMS, params: { LAYERS: "show:0", FORMAT: "png32" } }), opacity: .82 });
-    const parcels = new ImageLayer({ source: new ImageArcGISRest({ url: CAD, params: { LAYERS: "show:1", FORMAT: "png32" } }), opacity: .9, minZoom: 9, visible: false });
+      className: "ol-layer ol-active-claims", source: new ImageArcGISRest({ url: CLAIMS, params: { LAYERS: "show:0", FORMAT: "png32" }, attributions: blmCredit }), opacity: .82 });
+    const parcels = new ImageLayer({ source: new ImageArcGISRest({ url: CAD, params: { LAYERS: "show:1", FORMAT: "png32" }, attributions: cadastralCredit }), opacity: .9, minZoom: 9, visible: false });
     const lowZoomReference = new TileLayer({
       source: new XYZ({
         url: `${REFERENCE_LABELS}/tile/{z}/{y}/{x}`,
@@ -358,76 +405,50 @@ export default function Home() {
     });
     const instance = new Map({
       target: target.current,
-      controls: [],
+      controls: [new Attribution({ collapsible: false })],
       layers: [streetFallback, satelliteFallback, publicLand, easements, claims, closedClaims, parcels, lowZoomReference, hydroLabels, roadLabels, geographicNames, vector],
       view: new View({ center: fromLonLat([-112.035, 46.685]), zoom: 11.2, minZoom: 5, maxZoom: 20 }),
     });
     const runInspect = async (lon: number, lat: number) => {
+      // Cancel the previous tap's lookups and ignore any of its late answers.
+      inspectAbort.current?.abort();
+      const controller = new AbortController();
+      inspectAbort.current = controller;
+      const seq = ++inspectSeq.current;
+      const isCurrent = () => seq === inspectSeq.current;
+      stakeSeq.current++;
+      window.clearTimeout(stakeTimer.current);
+
       setNavTab("explore");
       setClickedLocation({ lon, lat });
       setCopiedDossier(false);
       setAiReport("");
-      setStakeCorners([]);
+      setStakeCorners([]); setStakeCenter(null); setStakeChecks(null); setStakeAngle(0);
 
-      vectors.current.getFeatures().filter(f => f.get("kind") === "tap").forEach(f => vectors.current.removeFeature(f));
+      vectors.current.getFeatures().filter(f => f.get("kind") === "tap" || f.get("kind") === "stakeBox").forEach(f => vectors.current.removeFeature(f));
       const tapPin = new Feature(new Point(fromLonLat([lon, lat])));
       tapPin.set("kind", "tap");
       vectors.current.addFeature(tapPin);
 
-      setParcel(null); setClaim(null); setActiveClaimsList([]); setLapsedClaimsList([]);
+      setParcel(null); setClaim(null); setActiveClaimsList([]); setLapsedClaimsList([]); setLandCheck(null);
       setClaimOpen(false); setParcelOpen(true); setSelectedPlace(null); setPlaceResults([]);
-      setParcelMessage("Checking BLM Active Claims, Lapsed Claims & Land Status…");
+      setParcelMessage("Checking BLM claims and land ownership…");
       setMinerals(null); setMineralsError(""); setMineralsLoading(true);
-      void loadMinerals(lon, lat);
-      void findDigSpots(lon, lat);
+      void loadMinerals(lon, lat, controller.signal, isCurrent);
+      void findDigSpots(lon, lat, controller.signal, isCurrent);
 
-      const cp = new URLSearchParams({
-        f: "json", geometry: `${lon},${lat}`, geometryType: "esriGeometryPoint",
-        inSR: "4326", spatialRel: "esriSpatialRelIntersects",
-        distance: "25", units: "esriSRUnit_Meter",
-        outFields: "*", returnGeometry: "false",
-      });
-      const pp = new URLSearchParams({
-        f: "json", geometry: `${lon},${lat}`, geometryType: "esriGeometryPoint",
-        inSR: "4326", spatialRel: "esriSpatialRelIntersects",
-        outFields: "*", returnGeometry: "false",
-      });
-
-      const [actRes, lapRes, parRes, pubRes] = await Promise.allSettled([
-        fetch(`${CLAIMS}/0/query?${cp}`).then(r => r.json()),
-        fetch(`${CLAIMS_CLOSED}/0/query?${cp}`).then(r => r.json()),
-        fetch(`${CAD}/1/query?${pp}`).then(r => r.json()),
-        fetch(`${CAD}/2/query?${pp}`).then(r => r.json()),
-      ]);
-
-      if (actRes.status === "fulfilled") {
-        const list = (actRes.value?.features || []).map((f: any) => normClaim(f.attributes)).filter((c: MiningClaim) => c.CSE_NAME);
-        setActiveClaimsList(list);
-        if (list[0]) setClaim(list[0]);
-      }
-      if (lapRes.status === "fulfilled") {
-        const list = (lapRes.value?.features || []).map((f: any) => normClaim(f.attributes)).filter((c: MiningClaim) => c.CSE_NAME);
-        setLapsedClaimsList(list);
-      }
-
-      const rec = (parRes.status === "fulfilled" ? parRes.value?.features?.[0]?.attributes : undefined) as Parcel | undefined;
-      const pubAttr = (pubRes.status === "fulfilled" ? pubRes.value?.features?.[0]?.attributes : undefined) as Record<string, any> | undefined;
-      const pubAgency = pubAttr
-        ? (pubAttr.Owner || pubAttr.OWNER || pubAttr.Agency || pubAttr.AGENCY || pubAttr.ManagingAgency ||
-           Object.values(pubAttr).find(v => typeof v === "string" && /BLM|BUREAU|FOREST|USFS|USDA|STATE|DNRC|FISH|FEDERAL/i.test(v)) || "")
-        : "";
-
-      if (rec) {
-        if (!rec.OwnerName && pubAgency) rec.OwnerName = String(pubAgency);
-        setParcel(rec);
-        setParcelMessage("Official Montana & BLM Land Intelligence");
-      } else if (pubAgency) {
-        setParcel({ OwnerName: String(pubAgency), PropType: "Public Land", PropAccess: "Public Access" });
-        setParcelMessage("Official Montana Public Land Record");
-      } else {
-        setParcel({ OwnerName: "Public / Unsubdivided Federal Tract", PropType: "Public Domain" });
-        setParcelMessage("Official Montana & BLM Land Intelligence");
-      }
+      const { check, parcel: parcelAttrs, publicOwner, active, closed } = await checkLandAt(lon, lat, controller.signal);
+      if (!isCurrent()) return;
+      const activeList = active.map(normClaim);
+      setActiveClaimsList(activeList);
+      if (activeList[0]) setClaim(activeList[0]);
+      setLapsedClaimsList(closed.map(normClaim));
+      setParcel(parcelAttrs
+        ? (parcelAttrs as Parcel)
+        : { OwnerName: publicOwner || undefined, PropType: publicOwner ? "Public land (no county parcel record)" : "No county parcel record found" });
+      setLandCheck(check);
+      const checkedAt = new Date(check.checkedAt).toLocaleTimeString();
+      setParcelMessage(check.failed.length ? `Some records couldn't be checked · ${checkedAt}` : `BLM + Montana cadastral records · checked ${checkedAt}`);
     };
     inspectRef.current = runInspect;
 
@@ -447,15 +468,17 @@ export default function Home() {
       try {
         const config = await (await fetch("/api/google/config")).json() as { enabled?: boolean; key?: string };
         if (!config.enabled || !config.key) return;
-        setGoogleBrowserKey(config.key);
+        const key = config.key;
+        setGoogleBrowserKey(key);
         const [satelliteSession, streetSession] = await Promise.all([
-          createGoogleTileSession(config.key, "satellite"),
-          createGoogleTileSession(config.key, "roadmap"),
+          createGoogleTileSession(key, "satellite"),
+          createGoogleTileSession(key, "roadmap"),
         ]);
         const makeSource = (session: string) => new XYZ({
-          url: `https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=${session}&key=${config.key}`,
+          url: `https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=${session}&key=${key}`,
           crossOrigin: "anonymous",
           maxZoom: 22,
+          attributions: "Google",
         });
         const googleSatellite = new TileLayer({ source: makeSource(satelliteSession), visible: true });
         const googleStreet = new TileLayer({ source: makeSource(streetSession), visible: false });
@@ -464,12 +487,30 @@ export default function Home() {
         instance.getLayers().insertAt(2, googleSatellite);
         baseLayers.current.satelliteFallback?.setVisible(false);
         baseLayers.current.streetFallback?.setVisible(false);
+        // Map Tiles API policy: show the copyright string the viewport endpoint returns for this view.
+        const updateCopyright = async () => {
+          const layer = googleSatellite.getVisible() ? googleSatellite : googleStreet.getVisible() ? googleStreet : null;
+          if (!layer) return;
+          const [west, south, east, north] = transformExtent(instance.getView().calculateExtent(instance.getSize()), "EPSG:3857", "EPSG:4326");
+          const params = new URLSearchParams({
+            session: layer === googleSatellite ? satelliteSession : streetSession, key,
+            zoom: String(Math.round(instance.getView().getZoom() ?? 0)),
+            north: String(Math.min(north, 89.9)), south: String(Math.max(south, -89.9)), east: String(east), west: String(west),
+          });
+          const res = await fetch(`https://tile.googleapis.com/tile/v1/viewport?${params}`);
+          if (!res.ok) return;
+          const data = await res.json() as { copyright?: string };
+          layer.getSource()?.setAttributions(data.copyright ? `Google · ${data.copyright}` : "Google");
+        };
+        googleCopyright.current = () => { void updateCopyright().catch(() => undefined); };
+        instance.on("moveend", googleCopyright.current);
+        googleCopyright.current();
         setGoogleMaps(true);
       } catch {
         setGoogleMaps(false);
       }
     })();
-    return () => { instance.setTarget(undefined); map.current = null; };
+    return () => { inspectAbort.current?.abort(); window.clearTimeout(stakeTimer.current); instance.setTarget(undefined); map.current = null; };
   }, []);
 
   useEffect(() => {
@@ -477,14 +518,17 @@ export default function Home() {
     baseLayers.current.street?.setVisible(base === "street");
     baseLayers.current.satelliteFallback?.setVisible(!googleMaps && base === "satellite");
     baseLayers.current.streetFallback?.setVisible(!googleMaps && base === "street");
+    googleCopyright.current?.();
   }, [base, googleMaps]);
 
   
+  /** List closed BLM claims in the current view. A failed lookup is shown as a failure, never as "none". */
   async function scanAreaForLapsedClaims() {
     if (!map.current) return;
     setScanOpen(true);
     setScanLoading(true);
     setScanResults([]);
+    setScanError("");
     try {
       const ext = map.current.getView().calculateExtent(map.current.getSize());
       const [minLon, minLat] = toLonLat([ext[0], ext[1]]);
@@ -498,27 +542,27 @@ export default function Home() {
         spatialRel: "esriSpatialRelIntersects",
         outFields: "*",
         returnGeometry: "true",
-        resultRecordCount: "60",
+        resultRecordCount: "200",
       });
-      const res = await (await fetch(`${CLAIMS_CLOSED}/0/query?${qp}`)).json();
+      const features = await arcgisFeatures(`${CLAIMS_CLOSED}/0/query?${qp}`);
       const seen = new Set<string>();
       const items: Array<MiningClaim & { lon?: number; lat?: number }> = [];
-      for (const f of (res.features || [])) {
-        const c = normClaim(f.attributes);
+      for (const f of features) {
+        const c = normClaim(f.attributes ?? {});
         const key = `${c.CSE_NR}-${c.CSE_NAME}`;
         if (seen.has(key)) continue;
         seen.add(key);
         const ring = f.geometry?.rings?.[0];
         let lon: number | undefined, lat: number | undefined;
         if (Array.isArray(ring) && ring.length) {
-          lon = ring.reduce((s: number, p: number[]) => s + p[0], 0) / ring.length;
-          lat = ring.reduce((s: number, p: number[]) => s + p[1], 0) / ring.length;
+          lon = ring.reduce((s, p) => s + p[0], 0) / ring.length;
+          lat = ring.reduce((s, p) => s + p[1], 0) / ring.length;
         }
         items.push({ ...c, lon, lat });
       }
       setScanResults(items);
     } catch {
-      setScanResults([]);
+      setScanError("Couldn't reach BLM's closed-claims service. That is not the same as \"no closed claims\" — try again.");
     } finally {
       setScanLoading(false);
     }
@@ -679,7 +723,7 @@ export default function Home() {
     routeFeatures.forEach(feature => feature.set("selected", feature.get("routeIndex") === choice.index));
     const selected = routeFeatures.find(feature => feature.get("routeIndex") === choice.index);
     if (selected?.getGeometry() && map.current) {
-      map.current.getView().fit((selected.getGeometry() as any), { padding: [130, 35, 230, 35], duration: 500, maxZoom: 16 });
+      map.current.getView().fit((selected.getGeometry() as LineString), { padding: [130, 35, 230, 35], duration: 500, maxZoom: 16 });
     }
     setRoute(choice);
   }
@@ -727,13 +771,14 @@ export default function Home() {
         display: "flex", flexDirection: "column", overflow: "hidden", fontFamily: "system-ui, sans-serif"
       }}>
         <div style={{ padding: "10px 14px", background: "linear-gradient(90deg, #0e7490, #1e293b)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <strong style={{ fontSize: "12px", letterSpacing: "0.4px" }}>💎 LAPSED CLAIMS IN THIS VIEW ({scanResults.length})</strong>
+          <strong style={{ fontSize: "12px", letterSpacing: "0.4px" }}>CLOSED BLM CLAIMS IN THIS VIEW ({scanResults.length})</strong>
           <button onClick={() => setScanOpen(false)} style={{ background: "none", border: "none", color: "#fff", fontSize: "16px", cursor: "pointer" }}>×</button>
         </div>
         <div style={{ padding: "10px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "8px" }}>
-          {scanLoading && <div style={{ fontSize: "12px", color: "#94a3b8", padding: "12px" }}>Scanning BLM Closed Claims database in this view…</div>}
-          {!scanLoading && scanResults.length === 0 && (
-            <div style={{ fontSize: "12px", color: "#94a3b8", padding: "12px" }}>No recently closed claims found in this exact map window. Try zooming out slightly or clicking another gold district!</div>
+          {scanLoading && <div style={{ fontSize: "12px", color: "#94a3b8", padding: "12px" }}>Checking BLM&apos;s closed-claim records for this view…</div>}
+          {scanError && <div style={{ fontSize: "12px", color: "#fca5a5", padding: "12px" }}>{scanError}</div>}
+          {!scanLoading && !scanError && scanResults.length === 0 && (
+            <div style={{ fontSize: "12px", color: "#94a3b8", padding: "12px" }}>{"No closed claims in BLM's mapped records for this view. BLM's closed-claim map covers only a small set of recent closures, so this doesn't mean the ground is open."}</div>
           )}
           {scanResults.map((item, idx) => (
             <div key={idx} onClick={() => {
@@ -785,10 +830,9 @@ export default function Home() {
           boxShadow: "0 4px 14px rgba(6, 182, 212, 0.5)"
         }}
       >
-        🔎 Scan Screen for Lapsed Claims
+        🔎 Scan view for closed claims
       </button>
       <button onClick={() => setAppMode(appMode === "beginner" ? "staker" : "beginner")} style={{ background: appMode === "beginner" ? "linear-gradient(135deg, #16a34a, #15803d)" : "linear-gradient(135deg, #eab308, #ca8a04)", color: appMode === "beginner" ? "#fff" : "#000", border: "1px solid #fff", borderRadius: "999px", padding: "6px 14px", fontSize: "11px", fontWeight: 900, whiteSpace: "nowrap", cursor: "pointer" }}>{appMode === "beginner" ? "🪣 Mode: Beginner Panning (Tap for Staker)" : "📐 Mode: Claim Staker & Flipper (Tap for Beginner)"}</button>
-      <button onClick={() => { const next = !clearSky; setClearSky(next); if (next) { baseLayers.current.satelliteFallback?.setSource(new XYZ({ url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", maxZoom: 19, crossOrigin: "anonymous" })); baseLayers.current.satellite?.setVisible(false); baseLayers.current.satelliteFallback?.setVisible(true); } else { baseLayers.current.satelliteFallback?.setSource(new XYZ({ url: "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", maxZoom: 20, crossOrigin: "anonymous" })); if (googleMaps && baseLayers.current.satellite) { baseLayers.current.satellite.setVisible(true); baseLayers.current.satelliteFallback?.setVisible(false); } } }} style={{ background: clearSky ? "#eab308" : "rgba(15,23,42,0.92)", color: clearSky ? "#000" : "#fde047", border: "1px solid #facc15", borderRadius: "999px", padding: "6px 12px", fontSize: "11px", fontWeight: 800, whiteSpace: "nowrap", cursor: "pointer" }}>{clearSky ? "☀️ Summer Aerial: ON" : "☀️ Clear Clouds (Summer Aerial)"}</button>
       {[
         { label: "💎 Hauser Lake (Sapphires)", lon: -111.885, lat: 46.662, z: 12.8 },
         { label: "🪙 Marysville (Gold)", lon: -112.302, lat: 46.748, z: 13.2 },
@@ -880,7 +924,7 @@ export default function Home() {
                   <span style={{ width: "14px", height: "14px", background: "#f59e0b", borderRadius: "3px", border: "1px solid #fff", flexShrink: 0 }} />
                   <span>
                     <strong style={{ color: "#fbbf24" }}>Open BLM Land</strong>
-                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>✅ You can claim this!</small>
+                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>Often open to claims — verify</small>
                   </span>
                 </span>
                 <input type="checkbox" checked={active.public} onChange={() => toggle("public")} style={{ accentColor: "#f59e0b", width: "16px", height: "16px", cursor: "pointer" }} />
@@ -892,7 +936,7 @@ export default function Home() {
                   <span style={{ width: "14px", height: "14px", background: "#ff00b7", borderRadius: "3px", border: "1px solid #fff", flexShrink: 0 }} />
                   <span>
                     <strong style={{ color: "#f472b6" }}>Already Taken</strong>
-                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>🛑 Someone owns it</small>
+                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>🛑 Claimed — don&apos;t dig without permission</small>
                   </span>
                 </span>
                 <input type="checkbox" checked={active.claims} onChange={() => toggle("claims")} style={{ accentColor: "#ff00b7", width: "16px", height: "16px", cursor: "pointer" }} />
@@ -903,8 +947,8 @@ export default function Home() {
                 <span style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
                   <span style={{ width: "14px", height: "14px", background: "#06b6d4", borderRadius: "3px", border: "1px solid #fff", flexShrink: 0 }} />
                   <span>
-                    <strong style={{ color: "#38bdf8" }}>Old Lapsed Claims</strong>
-                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>💎 Open to restake!</small>
+                    <strong style={{ color: "#38bdf8" }}>Closed Claims</strong>
+                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>Closed — research before restaking</small>
                   </span>
                 </span>
                 <input type="checkbox" checked={active.closedClaims} onChange={() => toggle("closedClaims")} style={{ accentColor: "#06b6d4", width: "16px", height: "16px", cursor: "pointer" }} />
@@ -979,12 +1023,12 @@ export default function Home() {
       <Layer color="#1dd1a1" title="Peaks, mountains & gulches" sub="Summits, mountain ranges & canyons" on={active.peaks} click={() => toggle("peaks")} />
       <h3>LAND INTELLIGENCE</h3>
       <Layer color="#ff8800" title="Private Property" sub="Orange grid · Private land (not claimable)" on={active.parcels} click={() => toggle("parcels")} />
-      <Layer color="#f59e0b" title="Public Lands" sub="Yellow = BLM Claimable · Blue = State · Green = USFS" on={active.public} click={() => toggle("public")} />
-      <Layer color="#06b6d4" title="Lapsed Claims (Restakeable)" sub="Cyan areas · Historic BLM claims open to restaking" on={active.closedClaims} click={() => toggle("closedClaims")} />
+      <Layer color="#f59e0b" title="Public Lands" sub="Yellow = BLM · Green = USFS · Blue = State (pale yellow = Reclamation, darker green = Fish & Wildlife)" on={active.public} click={() => toggle("public")} />
+      <Layer color="#06b6d4" title="Closed Claims" sub="Cyan · Closed in BLM records — research before restaking" on={active.closedClaims} click={() => toggle("closedClaims")} />
       <Layer color="#ff00b7" title="Active Mining Claims" sub="Pink areas · Staked claims recorded with BLM" on={active.claims} click={() => toggle("claims")} />
       <Layer color="#a855f7" title="Conservation Easements" sub="Purple areas · Protected land" on={active.easements} click={() => toggle("easements")} />
       <div className="legend" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", fontSize: "11px", marginTop: "12px", background: "rgba(0,0,0,0.3)", padding: "10px", borderRadius: "8px" }}>
-        <span><span style={{ display: "inline-block", width: "12px", height: "12px", background: "#f59e0b", borderRadius: "2px", marginRight: "6px" }}/><b>Yellow:</b> BLM (Claimable)</span>
+        <span><span style={{ display: "inline-block", width: "12px", height: "12px", background: "#f59e0b", borderRadius: "2px", marginRight: "6px" }}/><b>Yellow:</b> BLM</span>
         <span><span style={{ display: "inline-block", width: "12px", height: "12px", background: "#06b6d4", borderRadius: "2px", marginRight: "6px" }}/><b>Cyan:</b> Lapsed Claims</span>
         <span><span style={{ display: "inline-block", width: "12px", height: "12px", background: "#ff00b7", borderRadius: "2px", marginRight: "6px" }}/><b>Pink:</b> Active Claims</span>
         <span><span style={{ display: "inline-block", width: "12px", height: "12px", background: "#38bdf8", borderRadius: "2px", marginRight: "6px" }}/><b>Blue:</b> State (No Staking)</span>
@@ -1004,8 +1048,7 @@ export default function Home() {
       <div className="facts">
         <div><span>CLAIM ACRES</span><b>{claim.RCRD_ACRS?.toFixed(2) || "—"}</b></div>
         <div><span>CLAIM TYPE</span><b>{claim.BLM_PROD || "—"}</b></div>
-        <div><span>PATENTED</span><b>{claim.MC_PATENTED === "Y" ? "Yes" : claim.MC_PATENTED === "N" ? "No" : "Not listed"}</b></div>
-        <div><span>MAP QUALITY</span><b>{claim.QLTY || "—"}</b></div>
+        <div><span>BLM MAPPED TO</span><b>{claim.CSE_META?.split("|")[0] || "—"}</b></div>
       </div>
       {clickedLocation && <button className="panel-save" onClick={() => saveLocation(claim.CSE_NAME || "Selected mining claim", "claim", clickedLocation.lon, clickedLocation.lat)}>☆ Save claim</button>}
       {clickedLocation && googleBrowserKey && <button className="panel-street" onClick={() => openStreetView(clickedLocation.lon, clickedLocation.lat, claim.CSE_NAME || "Selected mining claim")}><StreetViewIcon/> Street View</button>}
@@ -1016,45 +1059,19 @@ export default function Home() {
     {parcelOpen && <aside className="panel parcel">
       <button className="close" onClick={() => setParcelOpen(false)}>×</button><small>{parcelMessage}</small>
       {(() => {
-        const owner = (parcel?.OwnerName || "").toUpperCase();
-        const isBLM = owner.includes("BLM") || owner.includes("BUREAU OF LAND MANAGEMENT") || owner.includes("PUBLIC DOMAIN");
-        const isUSFS = owner.includes("FOREST SERVICE") || owner.includes("USFS") || owner.includes("USDA");
-        const isState = owner.includes("STATE OF MONTANA") || owner.includes("DNRC");
-        const activeAcres = activeClaimsList.reduce((s, c) => s + (c.RCRD_ACRS || 0), 0);
-        let bg = "#334155", badge = "🔍 INSPECTING GROUND", msg = "Checking public land and claim records…";
-        if (activeClaimsList.length > 0) {
-          bg = "#be185d";
-          badge = `🛑 ${activeClaimsList.length} ACTIVE CLAIM(S) RECORDED (${activeAcres.toFixed(0)} ACRES)`;
-          msg = `Active: ${activeClaimsList.slice(0, 3).map(c => `${c.CSE_NAME} (${c.CSE_NR || c.LEG_CSE_NR})`).join(", ")}. Note: If total claimed acres are less than the 160-acre section, open ground may still exist nearby!`;
-        } else if ((isBLM || isUSFS) && lapsedClaimsList.length > 0) {
-          bg = "#0e7490";
-          badge = `💎 JACKPOT: ${lapsedClaimsList.length} LAPSED CLAIM(S) ON OPEN ${isBLM ? "BLM" : "USFS"} LAND!`;
-          msg = `Zero active claims! Past miners staked: ${lapsedClaimsList.slice(0, 3).map(c => `${c.CSE_NAME} (${c.CSE_NR || c.LEG_CSE_NR})`).join(", ")}. Prime restake candidate!`;
-        } else if (isBLM) {
-          bg = "#b45309";
-          badge = "✅ OPEN BLM LAND — LEGAL TO STAKE!";
-          msg = "Managed by BLM with zero active claims recorded here.";
-        } else if (isUSFS) {
-          bg = "#15803d";
-          badge = "🌲 NATIONAL FOREST — OPEN UNLESS WITHDRAWN";
-          msg = "USFS land with zero active claims. Verify no wilderness/recreation withdrawal applies.";
-        } else if (isState) {
-          bg = "#1d4ed8";
-          badge = "🚫 STATE TRUST LAND — NO FEDERAL STAKING";
-          msg = "Requires a Montana DNRC state mineral lease.";
-        } else if (parcel?.OwnerName) {
-          bg = "#9a3412";
-          badge = "🏠 PRIVATE PROPERTY — OFF LIMITS";
-          msg = `Private surface owner (${parcel.OwnerName}).${lapsedClaimsList.length ? ` (${lapsedClaimsList.length} historic closed claims on file).` : ""}`;
-        }
+        const verdict = landCheck ? landVerdict(landCheck) : null;
+        const bg = verdict ? VERDICT_BG[verdict.tone] : "#334155";
+        const badge = verdict?.badge ?? "🔍 CHECKING CLAIMS & OWNERSHIP…";
+        const claimNames = (list: MiningClaim[]) => list.slice(0, 3).map(c => `${c.CSE_NAME} (${c.CSE_NR})`).join(", ");
+        const msg = verdict
+          ? [verdict.detail, activeClaimsList.length ? `Active: ${claimNames(activeClaimsList)}.` : "", lapsedClaimsList.length ? `Closed on file: ${claimNames(lapsedClaimsList)}.` : ""].filter(Boolean).join(" ")
+          : "Checking BLM claims and Montana land records…";
         return (
           <div style={{ background: bg, padding: "12px", borderRadius: "10px", marginTop: "8px", marginBottom: "10px", color: "#fff", border: "1px solid rgba(255,255,255,0.25)" }}>
             <div style={{ fontWeight: 900, fontSize: "12px", letterSpacing: "0.4px", marginBottom: "4px" }}>{badge}</div>
             <div style={{ fontSize: "12px", lineHeight: "1.4", opacity: 0.95 }}>{msg}</div>
-            {lapsedClaimsList.length > 0 && activeClaimsList.length > 0 && (
-              <div style={{ marginTop: "6px", paddingTop: "6px", borderTop: "1px solid rgba(255,255,255,0.2)", fontSize: "11px", color: "#a5f3fc" }}>
-                💎 Also in this section: <b>{lapsedClaimsList.length} Lapsed Claim(s)</b> ({lapsedClaimsList.slice(0, 2).map(c => c.CSE_NAME).join(", ")})
-              </div>
+            {verdict?.tone === "unknown" && clickedLocation && (
+              <button onClick={() => inspectRef.current?.(clickedLocation.lon, clickedLocation.lat)} style={{ marginTop: "8px", width: "100%", background: "rgba(0,0,0,0.35)", color: "#fff", border: "1px solid rgba(255,255,255,0.3)", borderRadius: "6px", padding: "6px 10px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}>↻ Re-check this spot</button>
             )}
             {clickedLocation && (
               <button onClick={() => {
@@ -1090,96 +1107,53 @@ export default function Home() {
                     <button onClick={runAiGeologist} style={{ background: "#22c55e", color: "#000", border: "none", borderRadius: "4px", padding: "5px 8px", fontSize: "11px", fontWeight: 800, cursor: "pointer" }}>Go</button>
                   </div>
                 )}
-                {aiReport && <div style={{ marginTop: "8px", fontSize: "11px", lineHeight: "1.45", color: "#e0e7ff", whiteSpace: "pre-wrap", maxHeight: "240px", overflowY: "auto", background: "rgba(0,0,0,0.4)", padding: "8px", borderRadius: "6px" }}>{aiReport}</div>}
+                {aiReport && <div style={{ marginTop: "8px", fontSize: "11px", lineHeight: "1.45", color: "#e0e7ff", whiteSpace: "pre-wrap", maxHeight: "240px", overflowY: "auto", background: "rgba(0,0,0,0.4)", padding: "8px", borderRadius: "6px" }}>{aiReport}{"\n\n— AI description of the photo and nearby records. Not a legal opinion or an assay."}</div>}
               </div>
             )}
             {digSpots.length > 0 && (
               <div style={{ marginTop: "8px", background: "rgba(20, 83, 45, 0.85)", padding: "9px", borderRadius: "8px", border: "1px solid #4ade80" }}>
                 <div style={{ fontSize: "10px", fontWeight: 900, color: "#86efac", marginBottom: "4px" }}>
-                  🟢 WHERE TO PHYSICALLY DIG (USGS CREEK-BEND ANALYSIS):
+                  🟢 CREEK-BEND CANDIDATES (USGS STREAM LINES — A MAP GUESS, NOT A GOLD GUARANTEE)
                 </div>
                 <div style={{ fontSize: "10px", color: "#dcfce7", marginBottom: "6px" }}>
-                  {activeClaimsList.length === 0 ? "✅ Open ground! Casual hand-panning & shovel digging is 100% legal here for $0 (no claim needed)." : "⚠️ Active claim in section—verify you are outside active posts before digging."}
+                  Each spot gets its own land check. Only dig where it says likely open, and look for claim posts first.
                 </div>
                 {digSpots.map((s, i) => (
-                  <div key={i} onClick={() => map.current?.getView().animate({ center: fromLonLat([s.lon, s.lat]), zoom: 17.2, duration: 600 })} style={{ background: "rgba(0,0,0,0.35)", padding: "6px 8px", borderRadius: "6px", marginTop: "4px", cursor: "pointer", borderLeft: "3px solid #22c55e" }}>
-                    <div style={{ fontWeight: 800, fontSize: "11px", color: "#4ade80" }}>🪣 Spot #{i + 1}: {s.label} (Tap to Zoom)</div>
-                    <div style={{ fontSize: "10px", color: "#f1f5f9", marginTop: "2px" }}>{s.tip}</div>
-                    <div style={{ fontSize: "9px", color: "#fde047", fontFamily: "monospace", marginTop: "2px" }}>GPS: {s.lat.toFixed(5)}, {s.lon.toFixed(5)}</div>
+                  <div key={`${s.lat},${s.lon}`} onClick={() => map.current?.getView().animate({ center: fromLonLat([s.lon, s.lat]), zoom: 17.2, duration: 600 })} style={{ background: "rgba(0,0,0,0.35)", padding: "6px 8px", borderRadius: "6px", marginTop: "4px", cursor: "pointer", borderLeft: "3px solid #22c55e" }}>
+                    <div style={{ fontWeight: 800, fontSize: "11px", color: "#4ade80" }}>🪣 Spot #{i + 1}: {s.name}, ~{Math.round(s.turnDeg)}° bend (tap to zoom)</div>
+                    <div style={{ fontSize: "10px", color: "#f1f5f9", marginTop: "2px" }}>Water slows on the inside of a bend, so gold can drop out on the inside gravel bar. Here the inside bank is the {s.insideSide} side. Try the upstream end of that bar, down to clay or bedrock.</div>
+                    <div style={{ fontSize: "10px", fontWeight: 800, marginTop: "3px", color: !s.verdict ? "#fde68a" : s.verdict.panning === "likely" ? "#86efac" : "#fca5a5" }}>{s.verdict ? s.verdict.short : "Checking land status…"}</div>
+                    <div style={{ fontSize: "9px", color: "#fde047", fontFamily: "monospace", marginTop: "2px" }}>GPS (mapped channel line): {s.lat.toFixed(5)}, {s.lon.toFixed(5)}</div>
                   </div>
                 ))}
               </div>
             )}
             {clickedLocation && (
               <button onClick={() => {
-                const isLode = lapsedClaimsList.some(c => /LODE/i.test(c.BLM_PROD || "") || (c.RCRD_ACRS && c.RCRD_ACRS > 20.3));
-                const widthFt = isLode ? 600 : 660;
-                const lengthFt = isLode ? 1500 : 1320;
-                const lat = clickedLocation.lat;
-                const lon = clickedLocation.lon;
-                const dLat = (lengthFt / 2) / 364000;
-                const dLon = (widthFt / 2) / (364000 * Math.cos(lat * Math.PI / 180));
-                const nw: [number, number] = [lon - dLon, lat + dLat];
-                const ne: [number, number] = [lon + dLon, lat + dLat];
-                const se: [number, number] = [lon + dLon, lat - dLat];
-                const sw: [number, number] = [lon - dLon, lat - dLat];
-
-                vectors.current.getFeatures().filter(f => f.get("kind") === "stakeBox").forEach(f => vectors.current.removeFeature(f));
-                const box = new Feature(new LineString([nw, ne, se, sw, nw].map(c => fromLonLat(c))));
-                box.set("kind", "stakeBox");
-                vectors.current.addFeature(box);
-                [nw, ne, se, sw].forEach(c => {
-                  const pt = new Feature(new Point(fromLonLat(c)));
-                  pt.set("kind", "stakeBox");
-                  vectors.current.addFeature(pt);
-                });
-                map.current?.getView().animate({ center: fromLonLat([lon, lat]), zoom: 15.8, duration: 600 });
-
-                const cornerLabels = [
-                  "NW Corner #1: " + nw[1].toFixed(6) + ", " + nw[0].toFixed(6),
-                  "NE Corner #2: " + ne[1].toFixed(6) + ", " + ne[0].toFixed(6),
-                  "SE Corner #3: " + se[1].toFixed(6) + ", " + se[0].toFixed(6),
-                  "SW Corner #4: " + sw[1].toFixed(6) + ", " + sw[0].toFixed(6),
-                ];
-                setStakeCorners(cornerLabels);
-
-                const targetName = lapsedClaimsList[0]?.CSE_NAME || "Montana Prospect #1";
-                const claimKind = isLode ? "20.66-Acre Lode Claim (1,500ft x 600ft)" : "20.00-Acre Placer Claim (1,320ft x 660ft)";
-                const packet = [
-                  "=== MONTANA 20-ACRE CLAIM STAKING & FLIP PACKET ===",
-                  "Target Name: " + targetName + " (Restake Candidate)",
-                  "Claim Dimensions: " + claimKind,
-                  "Center GPS: " + lat.toFixed(6) + ", " + lon.toFixed(6),
-                  "Google Maps Link: https://www.google.com/maps?q=" + lat + "," + lon,
-                  "",
-                  "--- 4 GPS CORNER POST COORDINATES (WALK WITH PHONE GPS) ---",
-                  ...cornerLabels,
-                  "",
-                  "--- MONTANA COUNTY & BLM CERTIFICATE OF LOCATION INFO ---",
-                  "County: " + (parcel?.CountyName || "Verify County") + " County, Montana",
-                  "Surface Management: " + (parcel?.OwnerName || "Federal Public Land"),
-                  "PLSS Legal Description: " + (parcel?.LegalDescriptionShort || "See BLM Map"),
-                  "Prior BLM Serial #: " + (lapsedClaimsList[0]?.CSE_NR || "None") + (lapsedClaimsList[0]?.extraInfo ? " (" + lapsedClaimsList[0].extraInfo + ")" : ""),
-                  "Montana Filing Deadlines: Post Monument on Ground -> Record at County Clerk within 60 days (MCA 82-2-102) -> File with BLM Montana State Office (Billings) within 90 days (43 CFR 3833).",
-                  "",
-                  "--- READY-TO-POST EBAY / GOLDBAY CLAIM LISTING COPY ---",
-                  "TITLE: 20-Acre Montana " + (isLode ? "Hard-Rock Lode" : "Placer Gold") + " Mining Claim - Historic '" + targetName + "' Area (" + (parcel?.CountyName || "MT") + " County)",
-                  "HIGHLIGHTS:",
-                  "• Located on open " + (parcel?.OwnerName || "Federal") + " public land in " + (parcel?.CountyName || "Montana") + " County (" + (parcel?.LegalDescriptionShort || "PLSS Verified") + ").",
-                  "• Covers the historic '" + targetName + "' claim area (Former BLM Serial #" + (lapsedClaimsList[0]?.CSE_NR || "N/A") + ").",
-                  "• USGS Mineral Records within 10 miles document: " + (minerals?.commodities?.join(", ") || "Gold & Silver") + " (" + (minerals?.reportedProductionCount || 0) + " past producing mines nearby).",
-                  "• Full 20-acre footprint mapped with 4 GPS corner coordinates.",
-                ].join("\n");
-                navigator.clipboard.writeText(packet);
+                const center = stakeCenter ?? clickedLocation;
+                redrawStakeBox(center, stakeAngle, claimKind);
+                map.current?.getView().animate({ center: fromLonLat([center.lon, center.lat]), zoom: 15.8, duration: 600 });
               }} style={{ marginTop: "6px", width: "100%", background: "linear-gradient(135deg, #eab308, #ca8a04)", color: "#0f172a", border: "1px solid #fef08a", borderRadius: "6px", padding: "7px 10px", fontSize: "11px", fontWeight: 900, cursor: "pointer" }}>
-                📐 Draw 20-Acre Claim Box & Copy Staking/Flip Packet
+                📐 Draw 20-acre claim box & check its corners
               </button>
             )}
-            {minerals && minerals.records.length > 0 && <div style={{ marginTop: "8px", background: "rgba(15,23,42,0.7)", padding: "8px", borderRadius: "8px", border: "1px solid #f97316" }}><div style={{ fontSize: "10px", fontWeight: 800, color: "#fdba74", marginBottom: "4px" }}>🟠 NEARBY USGS MINES (TAP 🎯 TO SNAP TO SHAFT):</div>{minerals.records.slice(0, 4).map((r: any) => <button key={r.id} onClick={() => { if (r.lon && r.lat) { map.current?.getView().animate({ center: fromLonLat([r.lon, r.lat]), zoom: 15.8, duration: 600 }); inspectRef.current?.(r.lon, r.lat); } }} style={{ width: "100%", marginTop: "4px", background: "rgba(249,115,22,0.22)", border: "1px solid #f97316", color: "#fff", borderRadius: "5px", padding: "5px 8px", fontSize: "11px", fontWeight: 700, cursor: "pointer", display: "flex", justifyContent: "space-between" }}><span>🎯 {r.name} ({r.commodities.slice(0, 2).join(", ") || r.status})</span><span>{r.distanceMiles < 0.1 ? "HERE!" : r.distanceMiles.toFixed(1) + " mi"}</span></button>)}</div>}
-            {stakeCorners.length > 0 && (
+            {minerals && minerals.records.length > 0 && <div style={{ marginTop: "8px", background: "rgba(15,23,42,0.7)", padding: "8px", borderRadius: "8px", border: "1px solid #f97316" }}><div style={{ fontSize: "10px", fontWeight: 800, color: "#fdba74", marginBottom: "4px" }}>🟠 NEARBY USGS MINES (TAP 🎯 TO SNAP TO SHAFT):</div>{minerals.records.slice(0, 4).map(r => <button key={r.id} onClick={() => { if (r.lon && r.lat) { map.current?.getView().animate({ center: fromLonLat([r.lon, r.lat]), zoom: 15.8, duration: 600 }); inspectRef.current?.(r.lon, r.lat); } }} style={{ width: "100%", marginTop: "4px", background: "rgba(249,115,22,0.22)", border: "1px solid #f97316", color: "#fff", borderRadius: "5px", padding: "5px 8px", fontSize: "11px", fontWeight: 700, cursor: "pointer", display: "flex", justifyContent: "space-between" }}><span>🎯 {r.name} ({r.commodities.slice(0, 2).join(", ") || r.status})</span><span>{r.distanceMiles < 0.1 ? "HERE!" : r.distanceMiles.toFixed(1) + " mi"}</span></button>)}</div>}
+            {stakeCenter && stakeCorners.length > 0 && (
               <div style={{ marginTop: "8px", background: "rgba(0,0,0,0.45)", padding: "8px", borderRadius: "6px", fontSize: "10px", fontFamily: "monospace", border: "1px solid #facc15" }}>
-                <div style={{ color: "#facc15", fontWeight: 800, marginBottom: "6px", display: "flex", justifyContent: "space-between" }}><span>✅ 20-ACRE BOX ({stakeAngle}°)</span><span style={{ display: "flex", gap: "3px" }}>{[["⬅️",-1,0],["⬆️",0,1],["⬇️",0,-1],["➡️",1,0]].map(([lbl,dx,dy]: any) => <button key={lbl} onClick={() => { if (!clickedLocation) return; const nLon = clickedLocation.lon + dx * 0.00035, nLat = clickedLocation.lat + dy * 0.00027; setClickedLocation({ lon: nLon, lat: nLat }); const isLode = lapsedClaimsList.some(x => /LODE/i.test(x.BLM_PROD || "") || (x.RCRD_ACRS && x.RCRD_ACRS > 20.3)); const hw = isLode ? 300 : 330, hl = isLode ? 750 : 660, rad = stakeAngle * Math.PI / 180, cos = Math.cos(rad), sin = Math.sin(rad), fLat = 364000, fLon = 364000 * Math.cos(nLat * Math.PI / 180); const pts: [number, number][] = [[-hw, hl], [hw, hl], [hw, -hl], [-hw, -hl]].map(([x, y]) => [nLon + (x * cos + y * sin) / fLon, nLat + (-x * sin + y * cos) / fLat]); vectors.current.getFeatures().filter(f => f.get("kind") === "stakeBox").forEach(f => vectors.current.removeFeature(f)); const b = new Feature(new LineString([...pts, pts[0]].map(p => fromLonLat(p)))); b.set("kind", "stakeBox"); vectors.current.addFeature(b); pts.forEach(p => { const pt = new Feature(new Point(fromLonLat(p))); pt.set("kind", "stakeBox"); vectors.current.addFeature(pt); }); setStakeCorners(pts.map((p, i) => "Corner #" + (i + 1) + ": " + p[1].toFixed(6) + ", " + p[0].toFixed(6))); }} style={{ background: "#334155", border: "1px solid #facc15", borderRadius: "4px", padding: "1px 5px", cursor: "pointer", fontSize: "10px" }}>{lbl}</button>)}</span></div><div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px" }}><span>Rotate:</span><input type="range" min={0} max={180} step={5} value={stakeAngle} onChange={e => { const deg = +e.target.value; setStakeAngle(deg); if (!clickedLocation) return; const isLode = lapsedClaimsList.some(x => /LODE/i.test(x.BLM_PROD || "") || (x.RCRD_ACRS && x.RCRD_ACRS > 20.3)); const hw = isLode ? 300 : 330, hl = isLode ? 750 : 660, rad = deg * Math.PI / 180, cos = Math.cos(rad), sin = Math.sin(rad), fLat = 364000, fLon = 364000 * Math.cos(clickedLocation.lat * Math.PI / 180); const pts: [number, number][] = [[-hw, hl], [hw, hl], [hw, -hl], [-hw, -hl]].map(([x, y]) => [clickedLocation.lon + (x * cos + y * sin) / fLon, clickedLocation.lat + (-x * sin + y * cos) / fLat]); vectors.current.getFeatures().filter(f => f.get("kind") === "stakeBox").forEach(f => vectors.current.removeFeature(f)); const b = new Feature(new LineString([...pts, pts[0]].map(p => fromLonLat(p)))); b.set("kind", "stakeBox"); vectors.current.addFeature(b); pts.forEach(p => { const pt = new Feature(new Point(fromLonLat(p))); pt.set("kind", "stakeBox"); vectors.current.addFeature(pt); }); setStakeCorners(pts.map((p, i) => "Corner #" + (i + 1) + ": " + p[1].toFixed(6) + ", " + p[0].toFixed(6))); }} style={{ flex: 1, accentColor: "#facc15" }} /></div>
-                {stakeCorners.map((c, i) => <div key={i}>{c}</div>)}
+                <div style={{ color: "#facc15", fontWeight: 800, marginBottom: "6px", display: "flex", justifyContent: "space-between", gap: "6px" }}>
+                  <span>📐 {CLAIM_SHAPES[claimKind].label} · {stakeAngle}°</span>
+                  <span style={{ display: "flex", gap: "3px" }}>{NUDGES.map(([label, eastFt, northFt]) => <button key={label} title="Move the box 100 ft" onClick={() => redrawStakeBox(offsetByFeet(stakeCenter, eastFt, northFt), stakeAngle, claimKind)} style={{ background: "#334155", border: "1px solid #facc15", borderRadius: "4px", padding: "1px 5px", cursor: "pointer", fontSize: "10px" }}>{label}</button>)}</span>
+                </div>
+                <div style={{ display: "flex", gap: "4px", marginBottom: "6px" }}>
+                  {(["placer", "lode"] as const).map(kind => <button key={kind} onClick={() => redrawStakeBox(stakeCenter, stakeAngle, kind)} style={{ flex: 1, background: claimKind === kind ? "#facc15" : "#334155", color: claimKind === kind ? "#0f172a" : "#fff", border: "1px solid #facc15", borderRadius: "4px", padding: "3px", cursor: "pointer", fontSize: "10px", fontWeight: 800 }}>{kind === "placer" ? "Placer (loose gravel)" : "Lode (vein in rock)"}</button>)}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}><span>Rotate:</span><input type="range" min={0} max={180} step={5} value={stakeAngle} onChange={e => redrawStakeBox(stakeCenter, +e.target.value, claimKind)} style={{ flex: 1, accentColor: "#facc15" }} /></div>
+                <div style={{ color: "#cbd5e1", marginBottom: "6px", fontFamily: "system-ui, sans-serif" }}>{claimKind === "placer" ? "On surveyed land, placers should follow the survey grid as closely as possible (43 CFR 3832.12). Keep 0° unless the land is unsurveyed." : "Lode claims run up to 1,500 ft along the vein and up to 300 ft each side of it."}</div>
+                {stakeCorners.map((c, i) => <div key={i}>Corner {stakeAngle === 0 ? ["NW", "NE", "SE", "SW"][i] : i + 1}: {c[1].toFixed(6)}, {c[0].toFixed(6)}</div>)}
+                <div style={{ marginTop: "6px", fontFamily: "system-ui, sans-serif" }}>{stakeChecks
+                  ? stakeChecks.map(p => <div key={p.label} style={{ color: p.verdict.panning === "likely" ? "#86efac" : "#fca5a5" }}>{p.label}: {p.verdict.short}</div>)
+                  : <div style={{ color: "#fde68a" }}>Checking land status at the centre and 4 corners…</div>}</div>
+                <button disabled={!stakeChecks} onClick={copyStakePacket} style={{ marginTop: "6px", width: "100%", background: stakeChecks ? "linear-gradient(135deg, #eab308, #ca8a04)" : "#475569", color: "#0f172a", border: "1px solid #fef08a", borderRadius: "6px", padding: "6px 10px", fontSize: "11px", fontWeight: 900, cursor: stakeChecks ? "pointer" : "wait" }}>{stakeCopied ? "✅ Copied staking checklist" : "📋 Copy staking checklist"}</button>
               </div>
             )}
           </div>
@@ -1311,13 +1285,6 @@ function decodePolyline(encoded: string): number[][] {
     points.push([longitude / 1e5, latitude / 1e5]);
   }
   return points;
-}
-
-function mineralDistanceMiles(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const radians = (degrees: number) => degrees * Math.PI / 180;
-  const dLat = radians(lat2 - lat1); const dLon = radians(lon2 - lon1);
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(radians(lat1)) * Math.cos(radians(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 3958.7613 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function Layer({ color, title, sub, on, click }: { color: string; title: string; sub: string; on: boolean; click: () => void }) {
