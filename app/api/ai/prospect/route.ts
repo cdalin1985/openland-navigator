@@ -8,6 +8,7 @@
  * deliberately no server-key fallback until this route has auth and rate limits.
  */
 import { NextResponse } from "next/server";
+import { NAIP_2025_URL, feetPerDegree } from "../../../lib/land-status";
 import { rejectCrossSite } from "../../../lib/same-origin";
 
 /** Listed on ai.google.dev/gemini-api/docs/models as of 2026-11-01. */
@@ -35,15 +36,23 @@ async function getElevationFt(lon: number, lat: number): Promise<number | null> 
   }
 }
 
-/** The zoom-17 Esri World Imagery tile containing the point (about 210 m across at 47°N), or null. */
+/** Half-width of the aerial image in metres (the image covers about 300 m × 300 m). */
+const IMAGE_HALF_WIDTH_M = 150;
+
+/**
+ * A 512 px 2025 NAIP aerial image (USDA imagery, ~0.3 m/pixel, served by the
+ * Montana State Library) centred on the point, or null.
+ */
 async function getTile(lon: number, lat: number): Promise<{ mimeType: string; data: string } | null> {
-  const z = 17;
-  const n = 2 ** z;
-  const r = (lat * Math.PI) / 180;
-  const x = Math.floor(((lon + 180) / 360) * n);
-  const y = Math.floor(((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n);
+  const k = feetPerDegree(lat);
+  const dLat = (IMAGE_HALF_WIDTH_M / 0.3048) / k.lat;
+  const dLon = (IMAGE_HALF_WIDTH_M / 0.3048) / k.lon;
+  const params = new URLSearchParams({
+    bbox: `${lon - dLon},${lat - dLat},${lon + dLon},${lat + dLat}`,
+    bboxSR: "4326", imageSR: "3857", size: "512,512", format: "jpg", f: "image",
+  });
   try {
-    const res = await fetch(`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`);
+    const res = await fetch(`${NAIP_2025_URL}/exportImage?${params}`);
     const mimeType = res.headers.get("content-type")?.split(";")[0].trim() ?? "";
     if (!res.ok || !mimeType.startsWith("image/")) return null;
     return { mimeType, data: Buffer.from(await res.arrayBuffer()).toString("base64") };
@@ -101,7 +110,7 @@ export async function POST(req: Request) {
   const prompt = [
     `You are a careful field geologist describing a Montana location for a beginner gold panner. Point: ${lat.toFixed(5)}, ${lon.toFixed(5)}, elevation ${spotElev ?? "unknown"} ft.`,
     tile
-      ? "The attached image is one aerial map tile, roughly 200 m across, that contains the point somewhere inside it. The point is not marked and may not be centred."
+      ? "The attached image is a 2025 summer aerial photo (USDA NAIP), about 300 m across, centred exactly on the point. North is up."
       : "No aerial image was available.",
     `Nearby USGS mineral records (straight-line distance; whether they drain to this creek has NOT been checked): ${mineSummary || "none"}.`,
     `Candidate creek bends from USGS stream lines: ${bends || "none"}.`,

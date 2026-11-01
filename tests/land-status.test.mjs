@@ -7,14 +7,17 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import {
+  aliquotHalves,
   arcgisFeatures,
   buildStakingPacket,
   checkLandAt,
   classifyLand,
+  closuresFrom,
   feetPerDegree,
   findBendSpots,
   landVerdict,
   offsetByFeet,
+  ringAcres,
   stakeBoxCorners,
 } from "../app/lib/land-status.ts";
 
@@ -22,7 +25,7 @@ const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
 
 const json = body => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
-const baseCheck = { category: "blm", ownerName: "US Bureau of Land Management", activeClaims: 0, closedClaims: 0, failed: [], checkedAt: "2026-11-01T00:00:00Z" };
+const baseCheck = { category: "blm", ownerName: "US Bureau of Land Management", activeClaims: 0, closedClaims: 0, closures: [], cautions: [], failed: [], checkedAt: "2026-11-01T00:00:00Z" };
 
 test("arcgisFeatures throws on ArcGIS's HTTP-200 error body instead of returning no features", async () => {
   globalThis.fetch = async () => json({ error: { code: 400, message: "Failed to execute query." } });
@@ -171,4 +174,81 @@ test("buildStakingPacket uses verified fees, warns about MCA 82-2-115, and inven
   assert.doesNotMatch(packet, /eBay|GoldBay|Gold & Silver|PLSS Verified|Restake Candidate/i);
   assert.doesNotMatch(buildStakingPacket({ kind: "lode", center, angleDeg: 20, corners, pointChecks: [{ label: "Centre", verdict: ok }] }), /STOP/);
   assert.match(buildStakingPacket({ kind: "lode", center, angleDeg: 20, corners, pointChecks: null }), /still running/);
+});
+
+test("closuresFrom keeps only in-force withdrawals that close the land to claims, plus wilderness", () => {
+  const rows = [
+    { BLM_PROD: "FEDERAL ENERGY REGULATORY COMMISSION WITHDRAWAL", CSE_DISP: "Authorized", SEG_MIN: "LOCATABLE MINERALS", CSE_NAME: "MISSOURI-MADISON" },
+    { BLM_PROD: "INDIAN RESERVATION WITHDRAWAL", CSE_DISP: "Status Record", SEG_MIN: null },
+    { BLM_PROD: "FOREST SERVICE NATIONAL FORESTS WITHDRAWAL", CSE_DISP: "Authorized", SEG_MIN: "NONE", CSE_NAME: "HELENA NF" },
+    { BLM_PROD: "RECLAMATION WITHDRAWAL", CSE_DISP: "Pending", SEG_MIN: "ALL MINERALS" },
+    { BLM_PROD: "POWER SITE RESERVATION WITHDRAWAL", CSE_DISP: "Authorized", SEG_MIN: "CLSD-EXCP METALIFRUS MNG" },
+    { BLM_PROD: "BLM MISCELLANEOUS WITHDRAWAL", CSE_DISP: "Authorized", SEG_MIN: "OTHER OR COMBINATIONS" },
+  ];
+  const { closed, cautions } = closuresFrom(rows, [{ wildernessname: "Gates of the Mountains Wilderness" }]);
+  assert.equal(closed.length, 3);
+  assert.match(closed.join(" | "), /Gates of the Mountains Wilderness/);
+  assert.match(closed.join(" | "), /MISSOURI-MADISON/);
+  assert.match(closed.join(" | "), /reclamation withdrawal, pending/);
+  assert.doesNotMatch(closed.join(" | "), /INDIAN RESERVATION|HELENA NF/);
+  assert.equal(cautions.length, 2);
+  assert.match(cautions[0], /metalliferous/);
+});
+
+test("landVerdict separates panning from staking for closures and failed closure lookups", () => {
+  const closed = landVerdict({ ...baseCheck, closures: ["Gates of the Mountains Wilderness — designated wilderness"] });
+  assert.equal(closed.staking, "no");
+  assert.equal(closed.panning, "ask");
+  assert.match(closed.badge, /CLOSED TO NEW MINING CLAIMS/);
+  const unchecked = landVerdict({ ...baseCheck, closures: null, failed: ["BLM withdrawals"] });
+  assert.equal(unchecked.panning, "likely");
+  assert.equal(unchecked.staking, "unknown");
+  assert.match(unchecked.detail, /Couldn't check BLM withdrawals/);
+  assert.equal(landVerdict({ ...baseCheck, cautions: ["x — confirm with BLM"] }).staking, "ask");
+  assert.equal(landVerdict(baseCheck).staking, "likely");
+  assert.equal(landVerdict({ ...baseCheck, category: "private" }).staking, "ask");
+});
+
+test("checkLandAt reports active withdrawals and wilderness as closures", async () => {
+  globalThis.fetch = async url => {
+    const u = String(url);
+    if (u.includes("Withdrawals")) return json({ features: [{ attributes: { BLM_PROD: "FEDERAL ENERGY REGULATORY COMMISSION WITHDRAWAL", CSE_DISP: "Authorized", SEG_MIN: "LOCATABLE MINERALS", CSE_NAME: "MISSOURI-MADISON" } }] });
+    if (u.includes("Wilderness")) return json({ features: [] });
+    if (u.includes("/2/query")) return json({ features: [{ attributes: { OWNER: "US Bureau of Land Management" } }] });
+    return json({ features: [] });
+  };
+  const { check } = await checkLandAt(-111.73, 46.65);
+  assert.equal(check.closures.length, 1);
+  assert.equal(landVerdict(check).staking, "no");
+  globalThis.fetch = async url => (String(url).includes("Wilderness") ? json({ error: { code: 500, message: "down" } }) : json({ features: [] }));
+  const failedLookup = await checkLandAt(-111.73, 46.65);
+  assert.equal(failedLookup.check.closures, null);
+  assert.ok(failedLookup.check.failed.includes("USFS wilderness"));
+});
+
+test("aliquotHalves splits a 40-acre quarter-quarter into four 20-acre halves in NW, NE, SE, SW order", () => {
+  const origin = { lon: -112.3, lat: 46.75 };
+  const corner = (e, n) => { const p = offsetByFeet(origin, e, n); return [p.lon, p.lat]; };
+  // A 1320 ft square with an extra vertex on its east edge, as BLM rings often have.
+  const ring = [corner(0, 1320), corner(1320, 1320), corner(1320, 660), corner(1320, 0), corner(0, 0), corner(0, 1320)];
+  assert.ok(Math.abs(ringAcres(ring.slice(0, 5)) - 40) < 0.05);
+  const halves = aliquotHalves(ring);
+  for (const half of ["N", "S", "E", "W"]) {
+    assert.ok(Math.abs(ringAcres(halves[half]) - 20) < 0.05, `${half} ${ringAcres(halves[half])}`);
+  }
+  const [nw, ne, se, sw] = halves.N;
+  assert.ok(nw[1] > sw[1] && ne[0] > nw[0] && se[1] < ne[1], "N half corners are ordered NW, NE, SE, SW");
+});
+
+test("buildStakingPacket uses the staking verdict and describes a snapped placer by survey unit", () => {
+  const center = { lon: -112.3, lat: 46.75 };
+  const corners = stakeBoxCorners(center, 0, "placer");
+  const panOkButClosed = landVerdict({ ...baseCheck, closures: ["Missouri-Madison power site — locatable minerals closed"] });
+  assert.match(buildStakingPacket({ kind: "placer", center, angleDeg: 0, corners, pointChecks: [{ label: "Centre", verdict: panOkButClosed }] }), /STOP[\s\S]*Closed to new claims/);
+  const ok = landVerdict(baseCheck);
+  const snapped = buildStakingPacket({ kind: "placer", center, angleDeg: 0, corners, pointChecks: [{ label: "Centre", verdict: ok }], surveyDescription: "N½ SWSE Sec 25, T13N R2W, Montana Meridian", acres: 20 });
+  assert.match(snapped, /Survey description \(BLM PLSS data; verify on the official plat\): N½ SWSE Sec 25/);
+  assert.doesNotMatch(snapped, /Rotation:/);
+  assert.doesNotMatch(snapped, /STOP/);
+  assert.match(buildStakingPacket({ kind: "placer", center, angleDeg: 0, corners, pointChecks: [{ label: "Centre", verdict: ok }], surveyDescription: "N½ X", acres: 20.4 }), /may not exceed 20 acres/);
 });
