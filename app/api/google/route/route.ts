@@ -1,3 +1,5 @@
+import { rejectCrossSite } from "../../../lib/same-origin";
+
 type Coordinate = [number, number];
 type GoogleRoute = {
   distanceMeters?: number;
@@ -7,6 +9,8 @@ type GoogleRoute = {
 };
 
 export async function POST(request: Request) {
+  const blocked = rejectCrossSite(request);
+  if (blocked) return blocked;
   const key = process.env.GOOGLE_MAPS_SERVER_KEY;
   if (!key) return Response.json({ enabled: false }, { status: 503 });
 
