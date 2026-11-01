@@ -10,7 +10,6 @@ import LineString from "ol/geom/LineString";
 import TileLayer from "ol/layer/Tile";
 import ImageLayer from "ol/layer/Image";
 import VectorLayer from "ol/layer/Vector";
-import OSM from "ol/source/OSM";
 import XYZ from "ol/source/XYZ";
 import ImageArcGISRest from "ol/source/ImageArcGISRest";
 import VectorSource from "ol/source/Vector";
@@ -21,9 +20,13 @@ import Attribution from "ol/control/Attribution";
 import type BaseLayer from "ol/layer/Base";
 import {
   CADASTRAL_URL as CAD, CLAIMS_CLOSED_URL as CLAIMS_CLOSED, CLAIMS_URL as CLAIMS, CLAIM_SHAPES, NHD_FLOWLINE_URL,
-  arcgisFeatures, buildStakingPacket, checkLandAt, distanceMiles, findBendSpots, landVerdict, offsetByFeet, stakeBoxCorners,
-  type Attributes, type BendSpot, type ClaimKind, type LandCheck, type Verdict,
+  aliquotHalves, arcgisFeatures, buildStakingPacket, checkLandAt, distanceMiles, findBendSpots, landVerdict, offsetByFeet,
+  ringAcres, stakeBoxCorners, surveyUnitAt,
+  type Attributes, type BendSpot, type ClaimKind, type Half, type LandCheck, type SurveyUnit, type Verdict,
 } from "./lib/land-status";
+
+const HALF_LABEL: Record<Half, string> = { N: "N½", S: "S½", E: "E½", W: "W½" };
+type StakeSnap = { half: Half; description: string; acres: number };
 
 type Parcel = {
   OwnerName?: string; AddressLine1?: string; CityStateZip?: string;
@@ -32,12 +35,8 @@ type Parcel = {
   LegalDescriptionShort?: string;
 };
 type Destination = { display_name: string; lon: string; lat: string };
-type RouteResult = { miles: string; minutes: number; provider: "Google Traffic" | "Open route" };
-type RouteChoice = RouteResult & { index: number; label: string; encodedPolyline: string };
 type Place = {
   id: string; name: string; address: string; lat: number; lon: number; category: string;
-  rating?: number; ratingCount?: number; openNow?: boolean; hours?: string[];
-  phone?: string; website?: string; googleMapsUrl?: string;
 };
 type MiningClaim = {
   CSE_NAME?: string; CSE_DISP?: string; BLM_PROD?: string; CSE_NR?: string;
@@ -57,31 +56,11 @@ type SavedLocation = {
   id: string; label: string; type: "place" | "parcel" | "claim" | "map point";
   lon: number; lat: number;
 };
-type StreetViewTarget = { lon: number; lat: number; label: string };
-type StreetViewPanoramaData = { location?: { pano?: string; description?: string } };
-type StreetViewPanoramaInstance = { setVisible: (visible: boolean) => void };
-type StreetViewLibrary = {
-  StreetViewPanorama: new (element: HTMLElement, options: Record<string, unknown>) => StreetViewPanoramaInstance;
-  StreetViewService: new () => {
-    getPanorama: (
-      request: { location: { lat: number; lng: number }; radius: number; preference: "nearest" },
-      callback: (data: StreetViewPanoramaData | null, status: string) => void,
-    ) => Promise<unknown>;
-  };
-  StreetViewStatus: { OK: string };
-};
-type GoogleMapsNamespace = { importLibrary: (name: "streetView") => Promise<StreetViewLibrary> };
-
-declare global {
-  interface Window {
-    google?: { maps?: GoogleMapsNamespace };
-    __openlandStreetViewReady?: () => void;
-  }
+/** Open turn-by-turn directions in Google Maps (Maps URLs need no API key). */
+function openDirections(lat: number, lon: number) {
+  window.open(`https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`, "_blank", "noopener");
 }
 
-let googleMapsLoader: Promise<GoogleMapsNamespace> | null = null;
-
-const ESRI_IMAGERY_ATTRIBUTION = "Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community";
 const VERDICT_BG: Record<Verdict["tone"], string> = { unknown: "#7c2d12", no: "#991b1b", ask: "#9a3412", caution: "#0e7490", likely: "#a16207" };
 /** Claim-box nudge buttons: label, feet east, feet north. */
 const NUDGES: Array<[string, number, number]> = [["⬅️", -100, 0], ["⬆️", 0, 100], ["⬇️", 0, -100], ["➡️", 100, 0]];
@@ -110,7 +89,6 @@ function normClaim(raw: Attributes): MiningClaim {
 export default function Home() {
   const target = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
-  const streetViewModeRef = useRef(false);
   const vectors = useRef(new VectorSource());
   const overlays = useRef<Record<string, BaseLayer>>({});
   const inspectRef = useRef<((lon: number, lat: number) => void) | null>(null);
@@ -121,10 +99,10 @@ export default function Home() {
   const inspectAbort = useRef<AbortController | null>(null);
   const stakeSeq = useRef(0);
   const stakeTimer = useRef<number | undefined>(undefined);
-  const [base, setBase] = useState<"satellite" | "street">("satellite");
+  const [base, setBase] = useState<"usgs" | "topo" | "google">("usgs");
   const [layers, setLayers] = useState(false);
   const [keyOpen, setKeyOpen] = useState(true);
-  const [active, setActive] = useState({ closedClaims: true, parcels: false, public: true, easements: false, claims: true, places: true, roads: true, water: true, peaks: true });
+  const [active, setActive] = useState({ closedClaims: true, mvum: true, parcels: false, public: true, easements: false, claims: true, places: true, roads: true, water: true, peaks: true });
   const [parcel, setParcel] = useState<Parcel | null>(null);
   const [parcelOpen, setParcelOpen] = useState(false);
   const [parcelMessage, setParcelMessage] = useState("");
@@ -137,6 +115,9 @@ export default function Home() {
   const [claimKind, setClaimKind] = useState<ClaimKind>("placer");
   const [stakeChecks, setStakeChecks] = useState<Array<{ label: string; verdict: Verdict }> | null>(null);
   const [stakeCopied, setStakeCopied] = useState(false);
+  const [stakeSnap, setStakeSnap] = useState<StakeSnap | null>(null);
+  const [surveyUnit, setSurveyUnit] = useState<SurveyUnit | null>(null);
+  const [surveyStatus, setSurveyStatus] = useState<"idle" | "loading" | "found" | "none" | "error">("idle");
   const [landCheck, setLandCheck] = useState<LandCheck | null>(null);
   const [scanError, setScanError] = useState("");
   const [stakeAngle, setStakeAngle] = useState(0);
@@ -158,12 +139,8 @@ export default function Home() {
   const [destination, setDestination] = useState<Destination | null>(null);
   const [selectedPlace, setSelectedPlace] = useState<Place | null>(null);
   const [placeResults, setPlaceResults] = useState<Place[]>([]);
-  const [route, setRoute] = useState<RouteResult | null>(null);
-  const [routeChoices, setRouteChoices] = useState<RouteChoice[]>([]);
+  const [searchMessage, setSearchMessage] = useState("");
   const [googleMaps, setGoogleMaps] = useState(false);
-  const [googleBrowserKey, setGoogleBrowserKey] = useState("");
-  const [streetViewMode, setStreetViewMode] = useState(false);
-  const [streetView, setStreetView] = useState<StreetViewTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [navTab, setNavTab] = useState<NavTab>("explore");
   const [savedLocations, setSavedLocations] = useState<SavedLocation[]>(() => {
@@ -276,20 +253,32 @@ export default function Home() {
     }
   }
 
-  /** Draw the claim box, then re-check land status at its centre and corners (debounced). */
-  function redrawStakeBox(center: { lon: number; lat: number }, angleDeg: number, kind: ClaimKind) {
-    const corners = stakeBoxCorners(center, angleDeg, kind);
+  /**
+   * Draw a claim polygon, then (debounced) re-check land status at its centre and
+   * corners and, for a free placer box, look up the BLM survey unit under its centre.
+   */
+  function showStakeBox(center: { lon: number; lat: number }, corners: Array<[number, number]>, angleDeg: number, kind: ClaimKind, snap: StakeSnap | null) {
     vectors.current.getFeatures().filter(f => f.get("kind") === "stakeBox").forEach(f => vectors.current.removeFeature(f));
     const box = new Feature(new LineString([...corners, corners[0]].map(c => fromLonLat(c))));
     box.set("kind", "stakeBox");
     vectors.current.addFeature(box);
     corners.forEach(c => { const pt = new Feature(new Point(fromLonLat(c))); pt.set("kind", "stakeBox"); vectors.current.addFeature(pt); });
-    setStakeCenter(center); setStakeAngle(angleDeg); setClaimKind(kind); setStakeCorners(corners);
+    setStakeCenter(center); setStakeAngle(angleDeg); setClaimKind(kind); setStakeCorners(corners); setStakeSnap(snap);
     setStakeChecks(null); setStakeCopied(false);
+    if (kind === "placer" && !snap) setSurveyStatus("loading");
     const seq = ++stakeSeq.current;
     window.clearTimeout(stakeTimer.current);
     stakeTimer.current = window.setTimeout(async () => {
-      const labels = angleDeg === 0 ? ["Corner NW", "Corner NE", "Corner SE", "Corner SW"] : ["Corner 1", "Corner 2", "Corner 3", "Corner 4"];
+      if (kind === "placer" && !snap) {
+        try {
+          const unit = await surveyUnitAt(center.lon, center.lat);
+          if (seq !== stakeSeq.current) return;
+          setSurveyUnit(unit); setSurveyStatus(unit ? "found" : "none");
+        } catch {
+          if (seq === stakeSeq.current) { setSurveyUnit(null); setSurveyStatus("error"); }
+        }
+      }
+      const labels = snap || angleDeg === 0 ? ["Corner NW", "Corner NE", "Corner SE", "Corner SW"] : ["Corner 1", "Corner 2", "Corner 3", "Corner 4"];
       const points: Array<[string, [number, number]]> = [["Centre", [center.lon, center.lat]], ...corners.map((c, i): [string, [number, number]] => [labels[i], c])];
       const results: Array<{ label: string; verdict: Verdict }> = [];
       for (const [label, [lon, lat]] of points) {
@@ -300,12 +289,27 @@ export default function Home() {
     }, 700);
   }
 
-  /** Copy the checklist for the box exactly as drawn now (corners, rotation, land checks). */
+  /** Free rectangle: centred on `center`, rotated clockwise by `angleDeg`. */
+  function redrawStakeBox(center: { lon: number; lat: number }, angleDeg: number, kind: ClaimKind) {
+    showStakeBox(center, stakeBoxCorners(center, angleDeg, kind), angleDeg, kind, null);
+  }
+
+  /** Snap a 20-acre placer to one half of the BLM quarter-quarter under the box. */
+  function snapToHalf(half: Half) {
+    if (!surveyUnit || surveyUnit.kind !== "aliquot") return;
+    const corners = aliquotHalves(surveyUnit.ring)[half];
+    const center = { lon: corners.reduce((s, c) => s + c[0], 0) / 4, lat: corners.reduce((s, c) => s + c[1], 0) / 4 };
+    const acres = (surveyUnit.acres ?? ringAcres(surveyUnit.ring)) / 2;
+    showStakeBox(center, corners, 0, "placer", { half, description: `${HALF_LABEL[half]} ${surveyUnit.label}`, acres });
+  }
+
+  /** Copy the checklist for the box exactly as drawn now (corners, rotation or survey unit, land checks). */
   function copyStakePacket() {
     if (!stakeCenter) return;
     const packet = buildStakingPacket({
       kind: claimKind, center: stakeCenter, angleDeg: stakeAngle, corners: stakeCorners,
       county: parcel?.CountyName, legal: parcel?.LegalDescriptionShort, pointChecks: stakeChecks,
+      surveyDescription: stakeSnap?.description, acres: stakeSnap?.acres,
     });
     void navigator.clipboard.writeText(packet)
       .then(() => { setStakeCopied(true); window.setTimeout(() => setStakeCopied(false), 3000); })
@@ -314,17 +318,32 @@ export default function Home() {
 
   useEffect(() => {
     if (!target.current) return;
-    const streetFallback = new TileLayer({ source: new OSM(), visible: false });
-    const satelliteFallback = new TileLayer({
+    const usgsImagery = new TileLayer({
       source: new XYZ({
-        url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        maxZoom: 19,
+        url: "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}",
+        maxZoom: 16,
         crossOrigin: "anonymous",
-        attributions: ESRI_IMAGERY_ATTRIBUTION,
+        attributions: "USGS The National Map: Orthoimagery",
       }),
-      visible: true,
     });
-    baseLayers.current = { streetFallback, satelliteFallback };
+    const naip = new ImageLayer({
+      source: new ImageArcGISRest({
+        url: "https://gisservice.mt.gov/arcgis/rest/services/MSDI_Framework/msdi_naip2025_provisional_image_v1/ImageServer",
+        params: { FORMAT: "jpgpng" },
+        attributions: "USDA NAIP 2025 (provisional) via Montana State Library",
+      }),
+      minZoom: 14,
+    });
+    const topo = new TileLayer({
+      source: new XYZ({
+        url: "https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}",
+        maxZoom: 16,
+        crossOrigin: "anonymous",
+        attributions: "USGS The National Map",
+      }),
+      visible: false,
+    });
+    baseLayers.current = { usgsImagery, naip, topo };
     const cadastralCredit = "Montana State Library (MSDI Cadastral)";
     const blmCredit = "BLM Mineral & Land Records System";
     const publicLand = new ImageLayer({ source: new ImageArcGISRest({ url: CAD, params: { LAYERS: "show:2", FORMAT: "png32" }, attributions: cadastralCredit }), opacity: .5 });
@@ -370,6 +389,14 @@ export default function Home() {
       }),
       minZoom: 6,
     });
+    const mvum = new ImageLayer({
+      source: new ImageArcGISRest({
+        url: "https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_MVUM_01/MapServer",
+        params: { LAYERS: "show:1,2", FORMAT: "png32", TRANSPARENT: true },
+        attributions: "USFS Motor Vehicle Use Map",
+      }),
+      minZoom: 11,
+    });
     const geographicNames = new ImageLayer({
       source: new ImageArcGISRest({
         url: GEONAMES,
@@ -383,7 +410,7 @@ export default function Home() {
       }),
       minZoom: 11,
     });
-    overlays.current = { closedClaims, parcels, public: publicLand, easements, claims, places: lowZoomReference, water: hydroLabels, roads: roadLabels, peaks: geographicNames };
+    overlays.current = { closedClaims, parcels, public: publicLand, easements, claims, places: lowZoomReference, water: hydroLabels, roads: roadLabels, mvum, peaks: geographicNames };
     labelLayers.current = [lowZoomReference, hydroLabels, roadLabels, geographicNames];
     const vector = new VectorLayer({
       source: vectors.current,
@@ -393,20 +420,12 @@ export default function Home() {
             image: new Circle({ radius: 6, fill: new Fill({ color: "#facc15" }), stroke: new Stroke({ color: "#000", width: 2 }) }),
             zIndex: 35,
           })
-        : f.get("kind") === "route"
-        ? new Style({
-            stroke: new Stroke({
-              color: f.get("selected") ? "#62f3aa" : ["#5bbcff", "#ffb65c", "#c8a7ff", "#ff6b7a"][f.get("routeIndex") % 4],
-              width: f.get("selected") ? 7 : 4,
-            }),
-            zIndex: f.get("selected") ? 20 : 10,
-          })
         : new Style({ image: new Circle({ radius: 9, fill: new Fill({ color: "#62f3aa" }), stroke: new Stroke({ color: "#fff", width: 4 }) }) }),
     });
     const instance = new Map({
       target: target.current,
       controls: [new Attribution({ collapsible: false })],
-      layers: [streetFallback, satelliteFallback, publicLand, easements, claims, closedClaims, parcels, lowZoomReference, hydroLabels, roadLabels, geographicNames, vector],
+      layers: [usgsImagery, naip, topo, publicLand, easements, claims, closedClaims, parcels, lowZoomReference, hydroLabels, roadLabels, mvum, geographicNames, vector],
       view: new View({ center: fromLonLat([-112.035, 46.685]), zoom: 11.2, minZoom: 5, maxZoom: 20 }),
     });
     const runInspect = async (lon: number, lat: number) => {
@@ -424,6 +443,7 @@ export default function Home() {
       setCopiedDossier(false);
       setAiReport("");
       setStakeCorners([]); setStakeCenter(null); setStakeChecks(null); setStakeAngle(0);
+      setStakeSnap(null); setSurveyUnit(null); setSurveyStatus("idle");
 
       vectors.current.getFeatures().filter(f => f.get("kind") === "tap" || f.get("kind") === "stakeBox").forEach(f => vectors.current.removeFeature(f));
       const tapPin = new Feature(new Point(fromLonLat([lon, lat])));
@@ -454,13 +474,6 @@ export default function Home() {
 
     instance.on("singleclick", async e => {
       const [lon, lat] = toLonLat(e.coordinate);
-      if (streetViewModeRef.current) {
-        streetViewModeRef.current = false;
-        setStreetViewMode(false);
-        setStreetView({ lon, lat, label: "Selected road" });
-        setParcelOpen(false); setClaimOpen(false); setPlaceResults([]); setLayers(false);
-        return;
-      }
       await runInspect(lon, lat);
     });
     map.current = instance;
@@ -469,38 +482,31 @@ export default function Home() {
         const config = await (await fetch("/api/google/config")).json() as { enabled?: boolean; key?: string };
         if (!config.enabled || !config.key) return;
         const key = config.key;
-        setGoogleBrowserKey(key);
-        const [satelliteSession, streetSession] = await Promise.all([
-          createGoogleTileSession(key, "satellite"),
-          createGoogleTileSession(key, "roadmap"),
-        ]);
-        const makeSource = (session: string) => new XYZ({
-          url: `https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=${session}&key=${key}`,
-          crossOrigin: "anonymous",
-          maxZoom: 22,
-          attributions: "Google",
+        const satelliteSession = await createGoogleTileSession(key);
+        const googleSatellite = new TileLayer({
+          source: new XYZ({
+            url: `https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=${satelliteSession}&key=${key}`,
+            crossOrigin: "anonymous",
+            maxZoom: 22,
+            attributions: "Google Maps",
+          }),
+          visible: false,
         });
-        const googleSatellite = new TileLayer({ source: makeSource(satelliteSession), visible: true });
-        const googleStreet = new TileLayer({ source: makeSource(streetSession), visible: false });
-        baseLayers.current = { ...baseLayers.current, satellite: googleSatellite, street: googleStreet };
-        instance.getLayers().insertAt(2, googleStreet);
-        instance.getLayers().insertAt(2, googleSatellite);
-        baseLayers.current.satelliteFallback?.setVisible(false);
-        baseLayers.current.streetFallback?.setVisible(false);
+        baseLayers.current = { ...baseLayers.current, google: googleSatellite };
+        instance.getLayers().insertAt(3, googleSatellite);
         // Map Tiles API policy: show the copyright string the viewport endpoint returns for this view.
         const updateCopyright = async () => {
-          const layer = googleSatellite.getVisible() ? googleSatellite : googleStreet.getVisible() ? googleStreet : null;
-          if (!layer) return;
+          if (!googleSatellite.getVisible()) return;
           const [west, south, east, north] = transformExtent(instance.getView().calculateExtent(instance.getSize()), "EPSG:3857", "EPSG:4326");
           const params = new URLSearchParams({
-            session: layer === googleSatellite ? satelliteSession : streetSession, key,
+            session: satelliteSession, key,
             zoom: String(Math.round(instance.getView().getZoom() ?? 0)),
             north: String(Math.min(north, 89.9)), south: String(Math.max(south, -89.9)), east: String(east), west: String(west),
           });
           const res = await fetch(`https://tile.googleapis.com/tile/v1/viewport?${params}`);
           if (!res.ok) return;
           const data = await res.json() as { copyright?: string };
-          layer.getSource()?.setAttributions(data.copyright ? `Google · ${data.copyright}` : "Google");
+          googleSatellite.getSource()?.setAttributions(data.copyright ? `Google Maps · ${data.copyright}` : "Google Maps");
         };
         googleCopyright.current = () => { void updateCopyright().catch(() => undefined); };
         instance.on("moveend", googleCopyright.current);
@@ -514,10 +520,10 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    baseLayers.current.satellite?.setVisible(base === "satellite");
-    baseLayers.current.street?.setVisible(base === "street");
-    baseLayers.current.satelliteFallback?.setVisible(!googleMaps && base === "satellite");
-    baseLayers.current.streetFallback?.setVisible(!googleMaps && base === "street");
+    baseLayers.current.usgsImagery?.setVisible(base === "usgs");
+    baseLayers.current.naip?.setVisible(base === "usgs");
+    baseLayers.current.topo?.setVisible(base === "topo");
+    baseLayers.current.google?.setVisible(base === "google");
     googleCopyright.current?.();
   }, [base, googleMaps]);
 
@@ -582,73 +588,51 @@ export default function Home() {
       vectors.current.getFeatures().filter(f => f.get("kind") === "me").forEach(f => vectors.current.removeFeature(f));
       const me = new Feature(new Point(pos)); me.set("kind", "me"); vectors.current.addFeature(me);
       map.current.getView().animate({ center: pos, zoom: 15.5, duration: 650 });
+      geo.setTracking(false);
     });
+    geo.once("error", () => geo.setTracking(false));
   }
 
   async function search(e: FormEvent) {
-    e.preventDefault(); if (!query.trim() || !map.current) return; setBusy(true); setNavTab("explore");
+    e.preventDefault(); if (!query.trim() || !map.current) return; setBusy(true); setNavTab("explore"); setSearchMessage("");
     try {
-      const [centerLon, centerLat] = toLonLat(map.current.getView().getCenter() || fromLonLat([-111.493, 47.523]));
-      const placesResponse = await fetch(`/api/google/places?q=${encodeURIComponent(query)}&lat=${centerLat}&lon=${centerLon}`);
-      if (placesResponse.ok) {
-        const placesData = await placesResponse.json() as { places?: Place[] };
-        if (placesData.places?.length) {
-          setPlaceResults(placesData.places); setSelectedPlace(null); setDestination(null); setRoute(null); setRouteChoices([]);
-          setParcelOpen(false); setClaimOpen(false);
+      const coords = query.match(/^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/);
+      if (coords) {
+        const lat = Number(coords[1]); const lon = Number(coords[2]);
+        if (lat >= 44 && lat <= 49.5 && lon >= -116.5 && lon <= -103.5) {
+          setDestination({ display_name: `${lat}, ${lon}`, lat: String(lat), lon: String(lon) });
+          setPlaceResults([]); setSelectedPlace(null); setParcelOpen(false); setClaimOpen(false);
+          map.current.getView().animate({ center: fromLonLat([lon, lat]), zoom: 15, duration: 700 });
           return;
         }
       }
-      const googleResponse = await fetch(`/api/google/geocode?q=${encodeURIComponent(query)}`);
-      if (googleResponse.ok) {
-        const found = await googleResponse.json() as Destination;
-        setDestination(found); setRoute(null); setRouteChoices([]); setPlaceResults([]); setSelectedPlace(null);
-        map.current.getView().animate({ center: fromLonLat([+found.lon, +found.lat]), zoom: 15, duration: 700 });
-        return;
+      const p = new URLSearchParams({ q: query, format: "jsonv2", limit: "5", countrycodes: "us", viewbox: "-116.05,49.0,-104.04,44.36", bounded: "0" });
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?${p}`);
+        if (!res.ok) throw new Error("Search failed");
+        const data = await res.json() as Array<{ place_id: number | string; name?: string; display_name: string; lat: string; lon: string; type?: string; category?: string }>;
+        const results: Place[] = data.map(r => ({
+          id: String(r.place_id), name: r.name || r.display_name.split(",")[0], address: r.display_name,
+          lat: Number(r.lat), lon: Number(r.lon), category: r.type || r.category || "Place",
+        }));
+        setPlaceResults(results); setSelectedPlace(null); setDestination(null);
+        setSearchMessage(results.length ? "" : "No match — try a town, creek, or lat, lon");
+      } catch {
+        setPlaceResults([]); setSearchMessage("Search unavailable — try again");
       }
-      const p = new URLSearchParams({ q: query, format: "jsonv2", limit: "1", countrycodes: "us" });
-      const found = (await (await fetch(`https://nominatim.openstreetmap.org/search?${p}`)).json())[0] as Destination;
-      if (!found) return;
-      setDestination(found); setRoute(null); setRouteChoices([]); setPlaceResults([]); setSelectedPlace(null);
-      map.current.getView().animate({ center: fromLonLat([+found.lon, +found.lat]), zoom: 15, duration: 700 });
+      setParcelOpen(false); setClaimOpen(false);
     } finally { setBusy(false); }
   }
 
   function choosePlace(place: Place) {
     setNavTab("explore");
-    setSelectedPlace(place); setPlaceResults([]); setRoute(null); setRouteChoices([]);
+    setSelectedPlace(place); setPlaceResults([]); 
     setDestination({ display_name: `${place.name}, ${place.address}`, lon: String(place.lon), lat: String(place.lat) });
     map.current?.getView().animate({ center: fromLonLat([place.lon, place.lat]), zoom: 16, duration: 700 });
   }
 
-  function routeToMapPoint(label: string) {
-    if (!clickedLocation) return;
-    setDestination({ display_name: label, lon: String(clickedLocation.lon), lat: String(clickedLocation.lat) });
-    setSelectedPlace(null); setPlaceResults([]); setRoute(null); setRouteChoices([]);
-    setParcelOpen(false); setClaimOpen(false);
-    setNavTab("explore");
-    map.current?.getView().animate({ center: fromLonLat([clickedLocation.lon, clickedLocation.lat]), zoom: 16, duration: 450 });
-  }
-
   function openTab(tab: NavTab) {
-    streetViewModeRef.current = false; setStreetViewMode(false); setStreetView(null);
-    setNavTab(tab); setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]);
-  }
-
-  function openStreetView(lon: number, lat: number, label: string) {
-    if (!googleBrowserKey) return;
-    streetViewModeRef.current = false; setStreetViewMode(false);
-    setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]);
-    setStreetView({ lon, lat, label });
-  }
-
-  function activateStreetView() {
-    if (!googleBrowserKey) return;
-    if (destination) {
-      openStreetView(+destination.lon, +destination.lat, selectedPlace?.name || destination.display_name.split(",").slice(0, 2).join(","));
-      return;
-    }
-    streetViewModeRef.current = true; setStreetViewMode(true); setStreetView(null);
-    setNavTab("explore"); setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]);
+    setNavTab(tab); setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]); setSearchMessage("");
   }
 
   function persistSaved(next: SavedLocation[]) {
@@ -669,63 +653,12 @@ export default function Home() {
 
   function selectSaved(item: SavedLocation) {
     setDestination({ display_name: item.label, lon: String(item.lon), lat: String(item.lat) });
-    setSelectedPlace(null); setRoute(null); setRouteChoices([]); setNavTab("explore");
+    setSelectedPlace(null);  setNavTab("explore");
     map.current?.getView().animate({ center: fromLonLat([item.lon, item.lat]), zoom: 16, duration: 650 });
   }
 
   function clearMap() {
-    vectors.current.getFeatures().filter(feature => feature.get("kind") === "route").forEach(feature => vectors.current.removeFeature(feature));
-    setDestination(null); setSelectedPlace(null); setRoute(null); setRouteChoices([]); setNavTab("explore");
-  }
-
-  function navigate() {
-    if (!destination || !map.current) return;
-    navigator.geolocation.getCurrentPosition(async pos => {
-      const origin: [number, number] = [pos.coords.longitude, pos.coords.latitude];
-      const destinationCoordinate: [number, number] = [+destination.lon, +destination.lat];
-      try {
-        const googleResponse = await fetch("/api/google/route", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ origin, destination: destinationCoordinate }),
-        });
-        if (googleResponse.ok) {
-          const googleData = await googleResponse.json() as { routes?: Array<{ optionLabel?: string; distanceMeters?: number; duration?: string; polyline?: { encodedPolyline?: string } }> };
-          const choices = (googleData.routes || []).flatMap((googleRoute, index) => {
-            const encodedPolyline = googleRoute.polyline?.encodedPolyline;
-            if (!encodedPolyline || typeof googleRoute.distanceMeters !== "number" || !googleRoute.duration) return [];
-            return [{
-              index,
-              label: googleRoute.optionLabel || (index === 0 ? "Recommended" : `Route ${index + 1}`),
-              miles: (googleRoute.distanceMeters / 1609.344).toFixed(1),
-              minutes: Math.round(parseFloat(googleRoute.duration) / 60),
-              provider: "Google Traffic" as const,
-              encodedPolyline,
-            }];
-          });
-          if (choices.length && map.current) {
-            drawRouteChoices(choices, map.current, vectors.current);
-            setRouteChoices(choices); setRoute(choices[0]);
-            return;
-          }
-        }
-      } catch { /* fall through to the open routing service */ }
-      const start = `${origin[0]},${origin[1]}`;
-      const end = `${destination.lon},${destination.lat}`;
-      const data = await (await fetch(`https://router.project-osrm.org/route/v1/driving/${start};${end}?overview=full&geometries=geojson`)).json();
-      const result = data.routes?.[0]; if (!result || !map.current) return;
-      drawRoute(result.geometry.coordinates, map.current, vectors.current);
-      setRouteChoices([]); setRoute({ miles: (result.distance / 1609.344).toFixed(1), minutes: Math.round(result.duration / 60), provider: "Open route" });
-    });
-  }
-
-  function selectRouteChoice(choice: RouteChoice) {
-    const routeFeatures = vectors.current.getFeatures().filter(feature => feature.get("kind") === "route");
-    routeFeatures.forEach(feature => feature.set("selected", feature.get("routeIndex") === choice.index));
-    const selected = routeFeatures.find(feature => feature.get("routeIndex") === choice.index);
-    if (selected?.getGeometry() && map.current) {
-      map.current.getView().fit((selected.getGeometry() as LineString), { padding: [130, 35, 230, 35], duration: 500, maxZoom: 16 });
-    }
-    setRoute(choice);
+    setDestination(null); setSelectedPlace(null); setNavTab("explore");
   }
 
   return <main className="shell">
@@ -981,6 +914,11 @@ export default function Home() {
               </label>
 
               <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", background: "rgba(255,255,255,0.04)", padding: "5px 7px", borderRadius: "6px", fontSize: "11px" }}>
+                <span>🚙 Legal FS roads</span>
+                <input type="checkbox" checked={active.mvum} onChange={() => toggle("mvum")} style={{ accentColor: "#a3e635" }} />
+              </label>
+
+              <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", background: "rgba(255,255,255,0.04)", padding: "5px 7px", borderRadius: "6px", fontSize: "11px" }}>
                 <span>🌊 Waters</span>
                 <input type="checkbox" checked={active.water} onChange={() => toggle("water")} style={{ accentColor: "#54a0ff" }} />
               </label>
@@ -1002,24 +940,29 @@ export default function Home() {
     </div>
     } {/* ===== END MAP KEY ===== */}
 
+    {/* eslint-disable-next-line @next/next/no-img-element */}
+    {base === "google" && <img src="https://www.gstatic.com/images/branding/productlogos/maps_2025/v1/192px.svg" alt="Google Maps" style={{ position: "absolute", left: "12px", bottom: "92px", height: "22px", zIndex: 6 }} />}
+
     <header>
       <b className="logo">OL</b>
       <form onSubmit={search}><span>⌕</span><input aria-label="Search" placeholder="Where to? Address, place or coordinates" value={query} onChange={e => setQuery(e.target.value)} /><button>{busy ? "…" : "Go"}</button></form>
       <button className="icon" aria-label="Layers" onClick={() => { setNavTab("explore"); setLayers(v => !v); }}>▱</button>
     </header>
-    <div className="live"><i/> LIVE PUBLIC DATA · MONTANA · {googleMaps ? "GOOGLE MAPS" : "OPEN MAP"}</div>
-    <div className="tools"><button aria-label="My location" onClick={locate}>⌾</button><button className={streetViewMode ? "street-view-tool active" : "street-view-tool"} aria-label="Street View" disabled={!googleBrowserKey} onClick={activateStreetView}><StreetViewIcon/></button><button aria-label="Zoom in" onClick={() => map.current?.getView().adjustZoom(1)}>＋</button><button aria-label="Zoom out" onClick={() => map.current?.getView().adjustZoom(-1)}>−</button></div>
+    <div className="live"><i/> LIVE PUBLIC DATA · MONTANA · {base === "usgs" ? "USGS IMAGERY" : base === "topo" ? "USGS TOPO" : "GOOGLE MAPS"}</div>
+    <div className="tools"><button aria-label="My location" onClick={locate}>⌾</button><button aria-label="Zoom in" onClick={() => map.current?.getView().adjustZoom(1)}>＋</button><button aria-label="Zoom out" onClick={() => map.current?.getView().adjustZoom(-1)}>−</button></div>
 
     {layers && <aside className="panel layer-panel">
       <div className="panel-title"><div><small>MAP DISPLAY</small><h2>Layers</h2></div><button onClick={() => setLayers(false)}>×</button></div>
       <div className="bases">
-        <button className={base === "satellite" ? "selected sat" : "sat"} onClick={() => setBase("satellite")}><b>Satellite</b><span>Google Hybrid</span></button>
-        <button className={base === "street" ? "selected streets" : "streets"} onClick={() => setBase("street")}><b>Street</b><span>{googleMaps ? "Google" : "Open map"}</span></button>
+        <button className={base === "usgs" ? "selected sat" : "sat"} onClick={() => setBase("usgs")}><b>Satellite</b><span>USGS + 2025 NAIP</span></button>
+        <button className={base === "topo" ? "selected streets" : "streets"} onClick={() => setBase("topo")}><b>Topo</b><span>USGS contours</span></button>
+        {googleMaps && <button className={base === "google" ? "selected sat" : "sat"} onClick={() => setBase("google")}><b>Google</b><span>Satellite</span></button>}
       </div>
       <h3>MAP REFERENCE</h3>
       <Layer color="#ffffff" title="Cities & towns" sub="Towns, places & county labels" on={active.places} click={() => toggle("places")} />
       <Layer color="#ff9f43" title="Roads & highways" sub="Interstates, highways & road numbers" on={active.roads} click={() => toggle("roads")} />
       <Layer color="#54a0ff" title="Rivers, creeks & lakes" sub="Waterways, ditches & reservoirs" on={active.water} click={() => toggle("water")} />
+      <Layer color="#a3e635" title="Forest roads open to vehicles" sub="USFS Motor Vehicle Use Map — roads & trails legal to drive" on={active.mvum} click={() => toggle("mvum")} />
       <Layer color="#1dd1a1" title="Peaks, mountains & gulches" sub="Summits, mountain ranges & canyons" on={active.peaks} click={() => toggle("peaks")} />
       <h3>LAND INTELLIGENCE</h3>
       <Layer color="#ff8800" title="Private Property" sub="Orange grid · Private land (not claimable)" on={active.parcels} click={() => toggle("parcels")} />
@@ -1051,8 +994,7 @@ export default function Home() {
         <div><span>BLM MAPPED TO</span><b>{claim.CSE_META?.split("|")[0] || "—"}</b></div>
       </div>
       {clickedLocation && <button className="panel-save" onClick={() => saveLocation(claim.CSE_NAME || "Selected mining claim", "claim", clickedLocation.lon, clickedLocation.lat)}>☆ Save claim</button>}
-      {clickedLocation && googleBrowserKey && <button className="panel-street" onClick={() => openStreetView(clickedLocation.lon, clickedLocation.lat, claim.CSE_NAME || "Selected mining claim")}><StreetViewIcon/> Street View</button>}
-      <button className="panel-route" onClick={() => routeToMapPoint(claim.CSE_NAME || "Selected mining claim")}>Show routes here ➜</button>
+      {clickedLocation && <button className="panel-route" onClick={() => openDirections(clickedLocation.lat, clickedLocation.lon)}>Directions in Google Maps ➜</button>}
       <p className="record-note">BLM commonly maps claims to the affected PLSS quarter-section. Staked claim boundaries may differ from this display.</p>
     </aside>}
 
@@ -1141,17 +1083,34 @@ export default function Home() {
             {stakeCenter && stakeCorners.length > 0 && (
               <div style={{ marginTop: "8px", background: "rgba(0,0,0,0.45)", padding: "8px", borderRadius: "6px", fontSize: "10px", fontFamily: "monospace", border: "1px solid #facc15" }}>
                 <div style={{ color: "#facc15", fontWeight: 800, marginBottom: "6px", display: "flex", justifyContent: "space-between", gap: "6px" }}>
-                  <span>📐 {CLAIM_SHAPES[claimKind].label} · {stakeAngle}°</span>
-                  <span style={{ display: "flex", gap: "3px" }}>{NUDGES.map(([label, eastFt, northFt]) => <button key={label} title="Move the box 100 ft" onClick={() => redrawStakeBox(offsetByFeet(stakeCenter, eastFt, northFt), stakeAngle, claimKind)} style={{ background: "#334155", border: "1px solid #facc15", borderRadius: "4px", padding: "1px 5px", cursor: "pointer", fontSize: "10px" }}>{label}</button>)}</span>
+                  <span>📐 {stakeSnap ? `Placer snapped: ${stakeSnap.description} (≈${stakeSnap.acres.toFixed(2)} ac)` : `${CLAIM_SHAPES[claimKind].label} · ${stakeAngle}°`}</span>
+                  {!stakeSnap && <span style={{ display: "flex", gap: "3px" }}>{NUDGES.map(([label, eastFt, northFt]) => <button key={label} title="Move the box 100 ft" onClick={() => redrawStakeBox(offsetByFeet(stakeCenter, eastFt, northFt), stakeAngle, claimKind)} style={{ background: "#334155", border: "1px solid #facc15", borderRadius: "4px", padding: "1px 5px", cursor: "pointer", fontSize: "10px" }}>{label}</button>)}</span>}
                 </div>
                 <div style={{ display: "flex", gap: "4px", marginBottom: "6px" }}>
-                  {(["placer", "lode"] as const).map(kind => <button key={kind} onClick={() => redrawStakeBox(stakeCenter, stakeAngle, kind)} style={{ flex: 1, background: claimKind === kind ? "#facc15" : "#334155", color: claimKind === kind ? "#0f172a" : "#fff", border: "1px solid #facc15", borderRadius: "4px", padding: "3px", cursor: "pointer", fontSize: "10px", fontWeight: 800 }}>{kind === "placer" ? "Placer (loose gravel)" : "Lode (vein in rock)"}</button>)}
+                  {(["placer", "lode"] as const).map(kind => <button key={kind} onClick={() => redrawStakeBox(stakeCenter, stakeSnap ? 0 : stakeAngle, kind)} style={{ flex: 1, background: claimKind === kind ? "#facc15" : "#334155", color: claimKind === kind ? "#0f172a" : "#fff", border: "1px solid #facc15", borderRadius: "4px", padding: "3px", cursor: "pointer", fontSize: "10px", fontWeight: 800 }}>{kind === "placer" ? "Placer (loose gravel)" : "Lode (vein in rock)"}</button>)}
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}><span>Rotate:</span><input type="range" min={0} max={180} step={5} value={stakeAngle} onChange={e => redrawStakeBox(stakeCenter, +e.target.value, claimKind)} style={{ flex: 1, accentColor: "#facc15" }} /></div>
-                <div style={{ color: "#cbd5e1", marginBottom: "6px", fontFamily: "system-ui, sans-serif" }}>{claimKind === "placer" ? "On surveyed land, placers should follow the survey grid as closely as possible (43 CFR 3832.12). Keep 0° unless the land is unsurveyed." : "Lode claims run up to 1,500 ft along the vein and up to 300 ft each side of it."}</div>
-                {stakeCorners.map((c, i) => <div key={i}>Corner {stakeAngle === 0 ? ["NW", "NE", "SE", "SW"][i] : i + 1}: {c[1].toFixed(6)}, {c[0].toFixed(6)}</div>)}
+                {claimKind === "placer" && (
+                  <div style={{ marginBottom: "6px", fontFamily: "system-ui, sans-serif", color: "#e2e8f0", background: "rgba(250,204,21,0.08)", padding: "6px", borderRadius: "4px" }}>
+                    {stakeSnap ? (
+                      <>Snapped to the BLM survey grid. Verify the description on the official BLM plat. <button onClick={() => redrawStakeBox(stakeCenter, 0, "placer")} style={{ marginLeft: "4px", background: "#334155", color: "#fff", border: "1px solid #facc15", borderRadius: "4px", padding: "1px 6px", cursor: "pointer", fontSize: "10px" }}>Unsnap (free box)</button></>
+                    ) : surveyStatus === "loading" ? "Looking up the BLM survey grid…"
+                      : surveyStatus === "error" ? "Couldn't reach BLM's survey grid. Draw the box again to retry."
+                      : surveyStatus === "none" ? "No BLM survey unit found here. The land may be unsurveyed, where a metes-and-bounds placer (free box) is allowed."
+                      : surveyStatus === "found" && surveyUnit?.kind === "aliquot" ? (
+                        <>
+                          <div>BLM survey unit here: <b>{surveyUnit.label}</b>{surveyUnit.acres ? ` (${surveyUnit.acres} ac)` : ""}. On surveyed land a placer should follow this grid (43 CFR 3832.12). Snap a 20-acre placer to:</div>
+                          <div style={{ display: "flex", gap: "4px", marginTop: "4px" }}>{(["N", "S", "E", "W"] as const).map(half => <button key={half} onClick={() => snapToHalf(half)} style={{ flex: 1, background: "#facc15", color: "#0f172a", border: "none", borderRadius: "4px", padding: "3px", cursor: "pointer", fontSize: "10px", fontWeight: 900 }}>{HALF_LABEL[half]}</button>)}</div>
+                        </>
+                      )
+                      : surveyStatus === "found" && surveyUnit ? `BLM survey unit here: ${surveyUnit.label}${surveyUnit.acres ? ` (${surveyUnit.acres} ac)` : ""}. Irregular unit: follow its lines on the official BLM plat. Snapping isn't available here.`
+                      : null}
+                  </div>
+                )}
+                {!stakeSnap && <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}><span>Rotate:</span><input type="range" min={0} max={180} step={5} value={stakeAngle} onChange={e => redrawStakeBox(stakeCenter, +e.target.value, claimKind)} style={{ flex: 1, accentColor: "#facc15" }} /></div>}
+                {claimKind === "lode" && <div style={{ color: "#cbd5e1", marginBottom: "6px", fontFamily: "system-ui, sans-serif" }}>Lode claims run up to 1,500 ft along the vein and up to 300 ft each side of it.</div>}
+                {stakeCorners.map((c, i) => <div key={i}>Corner {stakeSnap || stakeAngle === 0 ? ["NW", "NE", "SE", "SW"][i] : i + 1}: {c[1].toFixed(6)}, {c[0].toFixed(6)}</div>)}
                 <div style={{ marginTop: "6px", fontFamily: "system-ui, sans-serif" }}>{stakeChecks
-                  ? stakeChecks.map(p => <div key={p.label} style={{ color: p.verdict.panning === "likely" ? "#86efac" : "#fca5a5" }}>{p.label}: {p.verdict.short}</div>)
+                  ? stakeChecks.map(p => <div key={p.label} style={{ color: p.verdict.staking === "likely" ? "#86efac" : "#fca5a5" }}>{p.label}: {p.verdict.short}</div>)
                   : <div style={{ color: "#fde68a" }}>Checking land status at the centre and 4 corners…</div>}</div>
                 <button disabled={!stakeChecks} onClick={copyStakePacket} style={{ marginTop: "6px", width: "100%", background: stakeChecks ? "linear-gradient(135deg, #eab308, #ca8a04)" : "#475569", color: "#0f172a", border: "1px solid #fef08a", borderRadius: "6px", padding: "6px 10px", fontSize: "11px", fontWeight: 900, cursor: stakeChecks ? "pointer" : "wait" }}>{stakeCopied ? "✅ Copied staking checklist" : "📋 Copy staking checklist"}</button>
               </div>
@@ -1181,41 +1140,36 @@ export default function Home() {
           <p className="mineral-note">A nearby occurrence or old production record is evidence—not proof of minerals beneath this exact parcel. MRDS locations and operating status can be dated; field verification, mineral rights, and permits are separate.</p>
         </section>
         {clickedLocation && <button className="panel-save" onClick={() => saveLocation(parcel.AddressLine1 || parcel.OwnerName || "Selected parcel", "parcel", clickedLocation.lon, clickedLocation.lat)}>☆ Save parcel</button>}
-        {clickedLocation && googleBrowserKey && <button className="panel-street" onClick={() => openStreetView(clickedLocation.lon, clickedLocation.lat, parcel.AddressLine1 || parcel.OwnerName || "Selected parcel")}><StreetViewIcon/> Street View</button>}
-        <button className="panel-route" onClick={() => routeToMapPoint(parcel.AddressLine1 || parcel.OwnerName || "Selected parcel")}>Show routes here ➜</button>
+        {clickedLocation && <button className="panel-route" onClick={() => openDirections(clickedLocation.lat, clickedLocation.lon)}>Directions in Google Maps ➜</button>}
         <details><summary>Legal record</summary><p>{parcel.LegalDescriptionShort}<br/>Parcel ID: {parcel.PARCELID}</p></details>
       </> : <div className="loading"><i/><i/><i/></div>}
     </aside>}
 
-    {placeResults.length > 0 && !parcelOpen && !claimOpen && <section className="panel place-results">
-      <div className="results-title"><div><small>GOOGLE PLACES</small><h2>Choose a result</h2></div><button onClick={() => setPlaceResults([])}>×</button></div>
+    {(placeResults.length > 0 || searchMessage) && !parcelOpen && !claimOpen && <section className="panel place-results">
+      <div className="results-title"><div><small>OPENSTREETMAP SEARCH</small><h2>Choose a result</h2></div><button onClick={() => { setPlaceResults([]); setSearchMessage(""); }}>×</button></div>
+      <p style={{ margin: "4px 14px", fontSize: "10px", color: "#94a3b8" }}>Search © OpenStreetMap contributors (Nominatim)</p>
+      {searchMessage && <p style={{ margin: "8px 14px", fontSize: "12px" }}>{searchMessage}</p>}
       <div className="results-list">{placeResults.map(place => <button key={place.id} onClick={() => choosePlace(place)}>
         <span><b>{place.name}</b><small>{place.category} · {place.address}</small></span>
-        <em>{place.openNow === true ? "Open" : place.openNow === false ? "Closed" : place.rating ? `★ ${place.rating}` : "›"}</em>
+        <em>›</em>
       </button>)}</div>
     </section>}
 
     {navTab === "explore" && destination && !parcelOpen && !claimOpen && placeResults.length === 0 && <section className="panel destination">
-      <div><small>{route ? `${route.provider.toUpperCase()} ROUTE` : selectedPlace ? "GOOGLE PLACE" : "DESTINATION"}</small><h2>{selectedPlace?.name || destination.display_name.split(",").slice(0,2).join(",")}</h2>
-        {selectedPlace && <p>{selectedPlace.category}{selectedPlace.rating ? ` · ★ ${selectedPlace.rating} (${selectedPlace.ratingCount || 0})` : ""}{selectedPlace.openNow === true ? " · Open now" : selectedPlace.openNow === false ? " · Closed" : ""}</p>}
-        {route && <p>{route.miles} miles · {route.minutes} minutes</p>}
-        {routeChoices.length > 1 && <div className="route-options">{routeChoices.map(choice => <button className={route === choice ? "selected" : ""} key={`${choice.index}-${choice.label}`} onClick={() => selectRouteChoice(choice)}>
-          <b>{choice.label}</b><span>{choice.minutes} min · {choice.miles} mi</span>
-        </button>)}</div>}
-        {selectedPlace && <div className="place-actions">{selectedPlace.phone && <a href={`tel:${selectedPlace.phone}`}>Call</a>}{selectedPlace.website && <a href={selectedPlace.website} target="_blank" rel="noreferrer">Website</a>}</div>}
+      <div><small>{selectedPlace ? "PLACE" : "DESTINATION"}</small><h2>{selectedPlace?.name || destination.display_name.split(",").slice(0,2).join(",")}</h2>
+        {selectedPlace && <p>{selectedPlace.category}</p>}
       </div>
-      <div className="destination-buttons"><button className="save-destination" aria-label="Clear destination" onClick={clearMap} title="Close">×</button><button className="save-destination" aria-label="Save destination" onClick={saveCurrentDestination}>☆</button>{googleBrowserKey && <button className="street-destination" aria-label="Open Street View" onClick={() => openStreetView(+destination.lon, +destination.lat, selectedPlace?.name || destination.display_name.split(",").slice(0, 2).join(","))}><StreetViewIcon/></button>}<button onClick={navigate}>{route ? "Re-route" : "Navigate"} ➜</button></div>
+      <div className="destination-buttons"><button className="save-destination" aria-label="Clear destination" onClick={clearMap} title="Close">×</button><button className="save-destination" aria-label="Save destination" onClick={saveCurrentDestination}>☆</button><button onClick={() => openDirections(+destination.lat, +destination.lon)}>Directions in Google Maps ➜</button></div>
     </section>}
-    {navTab === "explore" && !destination && !parcelOpen && !claimOpen && placeResults.length === 0 && <div className={streetViewMode ? "panel hint street-hint" : "panel hint"}><b>{streetViewMode ? <StreetViewIcon/> : "◎"}</b><span><strong>{streetViewMode ? "Tap a road for Street View" : "Tap the map"}</strong><small>{streetViewMode ? "Choose a mapped road or roadside location" : "Owners, public land and active mining claims"}</small></span></div>}
+    {navTab === "explore" && !destination && !parcelOpen && !claimOpen && placeResults.length === 0 && !searchMessage && <div className="panel hint"><b>◎</b><span><strong>Tap the map</strong><small>Owners, public land and active mining claims</small></span></div>}
 
     {navTab !== "explore" && <section className="panel nav-sheet">
       <div className="nav-sheet-title"><div><small>OPENLAND</small><h2>{navTab === "routes" ? "Routes" : navTab === "saved" ? "Saved places" : "More"}</h2></div><button onClick={() => openTab("explore")}>×</button></div>
       {navTab === "routes" && <div className="tab-content">
         {destination ? <>
-          <div className="current-destination"><span>DESTINATION</span><b>{selectedPlace?.name || destination.display_name.split(",").slice(0, 2).join(",")}</b>{route ? <small>{route.minutes} min · {route.miles} mi · {route.provider}</small> : <small>Ready to calculate directions</small>}</div>
-          {routeChoices.length > 1 && <div className="route-list">{routeChoices.map(choice => <button className={route === choice ? "selected" : ""} key={`${choice.index}-${choice.label}`} onClick={() => selectRouteChoice(choice)}><span><b>{choice.label}</b><small>{choice.provider}</small></span><em>{choice.minutes} min<br/>{choice.miles} mi</em></button>)}</div>}
-          <div className="sheet-actions"><button onClick={navigate}>{route ? "Refresh routes" : "Get up to 5 routes"}</button><button className="secondary" onClick={saveCurrentDestination}>☆ Save</button></div>
-        </> : <div className="tab-empty"><b>Choose a destination first</b><p>Search for a place or tap any parcel or active mining claim, then choose “Show routes here.”</p><button onClick={() => openTab("explore")}>Explore map</button></div>}
+          <div className="current-destination"><span>DESTINATION</span><b>{selectedPlace?.name || destination.display_name.split(",").slice(0, 2).join(",")}</b><small>Opens turn-by-turn directions in Google Maps</small></div>
+          <div className="sheet-actions"><button onClick={() => openDirections(+destination.lat, +destination.lon)}>Directions in Google Maps ➜</button><button className="secondary" onClick={saveCurrentDestination}>☆ Save</button></div>
+        </> : <div className="tab-empty"><b>Choose a destination first</b><p>Search for a place or tap any parcel or active mining claim, then choose “Directions in Google Maps.”</p><button onClick={() => openTab("explore")}>Explore map</button></div>}
       </div>}
       {navTab === "saved" && <div className="tab-content">
         {destination && <button className="save-current" onClick={saveCurrentDestination}>☆ Save current destination</button>}
@@ -1230,23 +1184,22 @@ export default function Home() {
         : <div className="tab-empty"><b>No saved locations yet</b><p>Use the ☆ button on a parcel, claim, place, or destination. Saved items stay on this phone.</p><button onClick={() => openTab("explore")}>Find a place</button></div>}
       </div>}
       {navTab === "more" && <div className="tab-content">
-        <div className="quick-grid"><button onClick={() => { openTab("explore"); locate(); }}><b>⌾</b><span>My location</span></button><button onClick={() => { openTab("explore"); setLayers(true); }}><b>▱</b><span>Map layers</span></button><button onClick={() => { setBase(base === "satellite" ? "street" : "satellite"); openTab("explore"); }}><b>◫</b><span>{base === "satellite" ? "Street map" : "Satellite"}</span></button><button disabled={!googleBrowserKey} onClick={activateStreetView}><b><StreetViewIcon/></b><span>Street View</span></button><button onClick={clearMap}><b>⌫</b><span>Clear route</span></button></div>
+        <div className="quick-grid"><button onClick={() => { openTab("explore"); locate(); }}><b>⌾</b><span>My location</span></button><button onClick={() => { openTab("explore"); setLayers(true); }}><b>▱</b><span>Map layers</span></button><button onClick={() => { setBase(base === "usgs" ? "topo" : base === "topo" && googleMaps ? "google" : "usgs"); openTab("explore"); }}><b>◫</b><span>{base === "usgs" ? "Topo map" : base === "topo" && googleMaps ? "Google satellite" : "USGS satellite"}</span></button><button onClick={clearMap}><b>⌫</b><span>Clear destination</span></button></div>
         <div className="about-card"><small>DATA SOURCES</small><p>Google Maps, Montana State Library cadastral data, BLM MLRS active claims, USGS GNIS geographic names, USGS transportation, and USGS mineral records.</p></div>
         <div className="about-card"><small>IPHONE APP</small><p>In Safari, tap Share, then <b>Add to Home Screen</b> to keep OpenLand beside your other navigation apps.</p></div>
       </div>}
     </section>}
 
-    {streetView && googleBrowserKey && <StreetViewViewer key={`${streetView.lat},${streetView.lon}`} target={streetView} apiKey={googleBrowserKey} onClose={() => setStreetView(null)} />}
 
     <nav aria-label="Primary"><button className={navTab === "explore" ? "active" : ""} onClick={() => openTab("explore")}>⌖<small>Explore</small></button><button className={navTab === "routes" ? "active" : ""} onClick={() => openTab("routes")}>↗<small>Routes</small></button><button className={navTab === "saved" ? "active" : ""} onClick={() => openTab("saved")}>☆<small>Saved</small></button><button className={navTab === "more" ? "active" : ""} onClick={() => openTab("more")}>☰<small>More</small></button></nav>
   </main>;
 }
 
-async function createGoogleTileSession(key: string, mapType: "satellite" | "roadmap") {
+async function createGoogleTileSession(key: string) {
   const response = await fetch(`https://tile.googleapis.com/v1/createSession?key=${key}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mapType, language: "en-US", region: "US" }),
+    body: JSON.stringify({ mapType: "satellite", language: "en-US", region: "US" }),
   });
   if (!response.ok) throw new Error("Google tile session failed");
   const data = await response.json() as { session?: string };
@@ -1254,130 +1207,7 @@ async function createGoogleTileSession(key: string, mapType: "satellite" | "road
   return data.session;
 }
 
-function drawRoute(coordinates: number[][], currentMap: Map, source: VectorSource) {
-  source.getFeatures().filter(f => f.get("kind") === "route").forEach(f => source.removeFeature(f));
-  const line = new Feature(new LineString(coordinates.map(c => fromLonLat(c))));
-  line.setProperties({ kind: "route", routeIndex: 0, selected: true }); source.addFeature(line);
-  currentMap.getView().fit(line.getGeometry()!, { padding: [130, 35, 210, 35], duration: 700, maxZoom: 16 });
-}
-
-function drawRouteChoices(choices: RouteChoice[], currentMap: Map, source: VectorSource) {
-  source.getFeatures().filter(feature => feature.get("kind") === "route").forEach(feature => source.removeFeature(feature));
-  const features = choices.map(choice => {
-    const feature = new Feature(new LineString(decodePolyline(choice.encodedPolyline).map(coordinate => fromLonLat(coordinate))));
-    feature.setProperties({ kind: "route", routeIndex: choice.index, selected: choice.index === choices[0].index });
-    return feature;
-  });
-  source.addFeatures(features);
-  currentMap.getView().fit(features[0].getGeometry()!, { padding: [130, 35, 230, 35], duration: 700, maxZoom: 16 });
-}
-
-function decodePolyline(encoded: string): number[][] {
-  const points: number[][] = [];
-  let index = 0, latitude = 0, longitude = 0;
-  while (index < encoded.length) {
-    let shift = 0, result = 0, byte: number;
-    do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
-    latitude += result & 1 ? ~(result >> 1) : result >> 1;
-    shift = 0; result = 0;
-    do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
-    longitude += result & 1 ? ~(result >> 1) : result >> 1;
-    points.push([longitude / 1e5, latitude / 1e5]);
-  }
-  return points;
-}
-
 function Layer({ color, title, sub, on, click }: { color: string; title: string; sub: string; on: boolean; click: () => void }) {
   return <button className="layer" onClick={click}><i style={{background: color}}/><span><b>{title}</b><small>{sub}</small></span><em className={on ? "switch on" : "switch"}><u/></em></button>;
 }
 
-function StreetViewIcon() {
-  return <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.6" fill="currentColor"/><path d="M8.2 10.2c0-1.8 1.5-3.2 3.3-3.2h1c1.8 0 3.3 1.4 3.3 3.2v2.3l2.1 2.1-1.7 1.7-2.3-2.3v7h-3v-5.2H9.2V21h-3v-8.6h2z" fill="currentColor"/></svg>;
-}
-
-function StreetViewViewer({ target, apiKey, onClose }: { target: StreetViewTarget; apiKey: string; onClose: () => void }) {
-  const canvas = useRef<HTMLDivElement>(null);
-  const [viewerState, setViewerState] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
-
-  useEffect(() => {
-    let cancelled = false;
-    let panorama: StreetViewPanoramaInstance | null = null;
-    void loadGoogleMaps(apiKey)
-      .then(maps => maps.importLibrary("streetView"))
-      .then(library => {
-        if (cancelled) return;
-        const service = new library.StreetViewService();
-        void service.getPanorama(
-          { location: { lat: target.lat, lng: target.lon }, radius: 1000, preference: "nearest" },
-          (data, status) => {
-            if (cancelled) return;
-            if (status !== library.StreetViewStatus.OK || !data?.location?.pano || !canvas.current) {
-              setViewerState("unavailable");
-              return;
-            }
-            panorama = new library.StreetViewPanorama(canvas.current, {
-              pano: data.location.pano,
-              pov: { heading: 0, pitch: 0 },
-              zoom: 1,
-              addressControl: true,
-              clickToGo: true,
-              fullscreenControl: true,
-              linksControl: true,
-              motionTracking: false,
-              motionTrackingControl: false,
-              panControl: true,
-              zoomControl: true,
-            });
-            setViewerState("ready");
-          },
-        ).catch(() => {
-          if (!cancelled) setViewerState("error");
-        });
-      })
-      .catch(() => {
-        if (!cancelled) setViewerState("error");
-      });
-
-    return () => {
-      cancelled = true;
-      panorama?.setVisible(false);
-    };
-  }, [apiKey, target.lat, target.lon]);
-
-  const googleMapsUrl = `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${target.lat},${target.lon}`;
-
-  return <section className="streetview-panel" aria-label={`Street View: ${target.label}`}>
-    <div className="streetview-bar"><div><small>GOOGLE STREET VIEW</small><b>{target.label}</b></div><a href={googleMapsUrl} target="_blank" rel="noreferrer">Open in Maps</a><button aria-label="Close Street View" onClick={onClose}>×</button></div>
-    <div className="streetview-canvas" ref={canvas} />
-    {viewerState !== "ready" && <div className="streetview-status" role="status">
-      {viewerState === "loading" ? <><i/><b>Finding nearby Street View…</b><span>Searching within 0.6 mile</span></> : <><StreetViewIcon/><b>{viewerState === "unavailable" ? "No Street View nearby" : "Street View could not load"}</b><span>{viewerState === "unavailable" ? "Try another point closer to a public road." : "Open the location in Google Maps or try again."}</span><a href={googleMapsUrl} target="_blank" rel="noreferrer">Open in Google Maps</a></>}
-    </div>}
-  </section>;
-}
-
-function loadGoogleMaps(apiKey: string) {
-  if (window.google?.maps) return Promise.resolve(window.google.maps);
-  if (googleMapsLoader) return googleMapsLoader;
-
-  googleMapsLoader = new Promise<GoogleMapsNamespace>((resolve, reject) => {
-    const script = document.createElement("script");
-    const timeout = window.setTimeout(() => reject(new Error("Google Maps timed out")), 15000);
-    const finish = () => {
-      window.clearTimeout(timeout);
-      if (window.google?.maps) resolve(window.google.maps);
-      else reject(new Error("Google Maps did not initialize"));
-    };
-
-    window.__openlandStreetViewReady = finish;
-    script.dataset.openlandGoogleMaps = "true";
-    script.async = true;
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly&loading=async&callback=__openlandStreetViewReady`;
-    script.onerror = () => {
-      window.clearTimeout(timeout);
-      reject(new Error("Google Maps failed to load"));
-    };
-    document.head.appendChild(script);
-  });
-
-  return googleMapsLoader;
-}
