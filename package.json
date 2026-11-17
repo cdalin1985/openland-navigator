@@ -22,7 +22,8 @@
     "next": "16.4.3",
     "ol": "^10.7.0",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "vinext": "0.0.50"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.66.0",
@@ -38,7 +39,6 @@
     "react-server-dom-webpack": "19.3.1",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
-    "vinext": "0.0.50",
     "vite": "8.3.5",
     "wrangler": "4.156.0"
   },
