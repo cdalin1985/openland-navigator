@@ -1,15 +1,16 @@
 {
- "generatedAt": "2026-11-16",
+ "generatedAt": "2026-11-17",
  "sources": [
   "USDA Forest Service Recreation Opportunities (EDW_RecreationOpportunities_01), activity 'Cabin Rentals'",
   "US Census Bureau TIGERweb state boundary (Montana)",
-  "Recreation.gov facility records (booking links verified against the live site)"
+  "Recreation.gov facility records, Forest Service and BLM (booking links verified against the live site)"
  ],
- "count": 124,
+ "count": 127,
  "cabins": [
   {
    "id": 82457,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Anna Creek Cabin",
    "kind": "Cabin",
    "forest": "Flathead NF",
@@ -22,6 +23,7 @@
   {
    "id": 5718,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Antone Station",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -32,8 +34,22 @@
    "note": ""
   },
   {
+   "id": 251354,
+   "src": "recreation.gov",
+   "agency": "BLM",
+   "name": "Axolotl Cabin",
+   "kind": "Cabin",
+   "forest": "Bureau of Land Management",
+   "status": "unknown",
+   "lat": 45.24056,
+   "lon": -111.87139,
+   "bookUrl": "https://www.recreation.gov/camping/campgrounds/251354",
+   "note": ""
+  },
+  {
    "id": 62961,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Bar Gulch Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -46,6 +62,7 @@
   {
    "id": 5635,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Basin Station Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -58,6 +75,7 @@
   {
    "id": 5636,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Battle Ridge Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -70,8 +88,9 @@
   {
    "id": 5719,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Bear Creek Bunkhouse",
-   "kind": "Cabin",
+   "kind": "House",
    "forest": "Beaverhead-Deerlodge NF",
    "status": "open",
    "lat": 45.15622,
@@ -82,6 +101,7 @@
   {
    "id": 5720,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Bear Creek Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -94,6 +114,7 @@
   {
    "id": 5637,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Beaver Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -106,6 +127,7 @@
   {
    "id": 66176,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Ben Rover Cabin",
    "kind": "Cabin",
    "forest": "Flathead NF",
@@ -118,6 +140,7 @@
   {
    "id": 10310,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Bend Guard Station",
    "kind": "Guard station",
    "forest": "Lolo NF",
@@ -130,6 +153,7 @@
   {
    "id": 71973,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Big Creek Baldy Lookout",
    "kind": "Lookout",
    "forest": "Kootenai NF",
@@ -142,6 +166,7 @@
   {
    "id": 5638,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Big Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -154,6 +179,7 @@
   {
    "id": 83457,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Big Hole Lookout",
    "kind": "Lookout",
    "forest": "Lolo NF",
@@ -166,6 +192,7 @@
   {
    "id": 5670,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Birch Creek Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -178,6 +205,7 @@
   {
    "id": 5721,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Black Butte Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -190,6 +218,7 @@
   {
    "id": 5671,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Bloody Dick Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -202,6 +231,7 @@
   {
    "id": 60448,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Boulder Point Lookout",
    "kind": "Lookout",
    "forest": "Bitterroot NF",
@@ -214,6 +244,7 @@
   {
    "id": 234402,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Bull River Guard Station",
    "kind": "Guard station",
    "forest": "Kootenai NF",
@@ -226,6 +257,7 @@
   {
    "id": 5639,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Cabin Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -238,6 +270,7 @@
   {
    "id": 61602,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Calf Creek Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -250,6 +283,7 @@
   {
    "id": 5684,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Canyon Creek Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -262,6 +296,7 @@
   {
    "id": 66318,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Challenge Cabin",
    "kind": "Cabin",
    "forest": "Flathead NF",
@@ -274,6 +309,7 @@
   {
    "id": 10311,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Cougar Peak Lookout",
    "kind": "Lookout",
    "forest": "Lolo NF",
@@ -286,6 +322,7 @@
   {
    "id": 77727,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Crandall Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -298,6 +335,7 @@
   {
    "id": 61594,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Crystal Lake Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -310,6 +348,7 @@
   {
    "id": 62959,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Cummings Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -322,6 +361,7 @@
   {
    "id": 5640,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Deer Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -334,6 +374,7 @@
   {
    "id": 60875,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Diamond Butte Lookout/Cabin",
    "kind": "Lookout",
    "forest": "Custer Gallatin NF",
@@ -346,6 +387,7 @@
   {
    "id": 80594,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Double Arrow Lookout",
    "kind": "Lookout",
    "forest": "Lolo NF",
@@ -358,6 +400,7 @@
   {
    "id": 5762,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Douglas Creek Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -370,6 +413,7 @@
   {
    "id": 61596,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Dry Wolf Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -382,6 +426,7 @@
   {
    "id": 62963,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Eagle Guard Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -394,6 +439,7 @@
   {
    "id": 84708,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Ear Mountain Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -406,6 +452,7 @@
   {
    "id": 60346,
    "src": "usfs",
+   "agency": "USFS",
    "name": "East Fork Cabin",
    "kind": "Cabin",
    "forest": "Bitterroot NF",
@@ -418,6 +465,7 @@
   {
    "id": 10192010,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Eldridge Guard Station",
    "kind": "Guard station",
    "forest": "Custer Gallatin NF",
@@ -430,6 +478,7 @@
   {
    "id": 80543,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Fairview Ranger Station",
    "kind": "Guard station",
    "forest": "Kootenai NF",
@@ -442,6 +491,7 @@
   {
    "id": 5700,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Fleecer Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -454,6 +504,7 @@
   {
    "id": 66202,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Ford Cabin",
    "kind": "Cabin",
    "forest": "Flathead NF",
@@ -466,6 +517,7 @@
   {
    "id": 5641,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Fourmile Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -478,6 +530,7 @@
   {
    "id": 5642,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Fox Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -488,8 +541,22 @@
    "note": ""
   },
   {
+   "id": 10388435,
+   "src": "recreation.gov",
+   "agency": "BLM",
+   "name": "Garnet Ghost Town Winter Cabin Rentals",
+   "kind": "Cabin",
+   "forest": "Bureau of Land Management",
+   "status": "unknown",
+   "lat": 46.82559,
+   "lon": -113.33945,
+   "bookUrl": "https://www.recreation.gov/camping/campgrounds/10388435",
+   "note": ""
+  },
+  {
    "id": 5643,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Garnet Mountain Lookout",
    "kind": "Lookout",
    "forest": "Custer Gallatin NF",
@@ -502,6 +569,7 @@
   {
    "id": 234426,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Garver Mountain Lookout",
    "kind": "Lookout",
    "forest": "Kootenai NF",
@@ -514,6 +582,7 @@
   {
    "id": 234434,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Gem Peak Lookout",
    "kind": "Lookout",
    "forest": "Kootenai NF",
@@ -526,6 +595,7 @@
   {
    "id": 60258,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Gird Point Lookout",
    "kind": "Lookout",
    "forest": "Bitterroot NF",
@@ -538,6 +608,7 @@
   {
    "id": 5692,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Gordon Reese Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -550,6 +621,7 @@
   {
    "id": 253491,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Granite Butte Lookout",
    "kind": "Lookout",
    "forest": "Helena-Lewis and Clark NF",
@@ -562,6 +634,7 @@
   {
    "id": 5736,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Hells Canyon Guard Station",
    "kind": "Guard station",
    "forest": "Beaverhead-Deerlodge NF",
@@ -572,8 +645,22 @@
    "note": ""
   },
   {
+   "id": 251352,
+   "src": "recreation.gov",
+   "agency": "BLM",
+   "name": "Henneberry House",
+   "kind": "House",
+   "forest": "Bureau of Land Management",
+   "status": "unknown",
+   "lat": 45.07639,
+   "lon": -112.79028,
+   "bookUrl": "https://www.recreation.gov/camping/campgrounds/251352",
+   "note": ""
+  },
+  {
    "id": 5701,
    "src": "usfs",
+   "agency": "USFS",
    "name": "High Rye Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -586,6 +673,7 @@
   {
    "id": 5693,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Hogan Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -598,8 +686,9 @@
   {
    "id": 10292,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Hogback Homestead",
-   "kind": "Cabin",
+   "kind": "House",
    "forest": "Lolo NF",
    "status": "open",
    "lat": 46.41049,
@@ -610,6 +699,7 @@
   {
    "id": 66218,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Hornet Lookout Cabin",
    "kind": "Lookout",
    "forest": "Flathead NF",
@@ -622,6 +712,7 @@
   {
    "id": 5672,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Horse Prairie Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -634,6 +725,7 @@
   {
    "id": 61598,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Hunters Spring Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -646,6 +738,7 @@
   {
    "id": 5644,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Ibex Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -658,6 +751,7 @@
   {
    "id": 62951,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Indian Flats Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -670,6 +764,7 @@
   {
    "id": 10040565,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Indian Meadows Guard Station",
    "kind": "Guard station",
    "forest": "Helena-Lewis and Clark NF",
@@ -682,6 +777,7 @@
   {
    "id": 61590,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Judith Guard Station Cabin",
    "kind": "Guard station",
    "forest": "Helena-Lewis and Clark NF",
@@ -694,6 +790,7 @@
   {
    "id": 62953,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Kading Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -706,6 +803,7 @@
   {
    "id": 61608,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Kenck Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -718,6 +816,7 @@
   {
    "id": 61600,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Kings Hill Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -730,6 +829,7 @@
   {
    "id": 5645,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Little Bear Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -742,6 +842,7 @@
   {
    "id": 5646,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Maxey Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -754,6 +855,7 @@
   {
    "id": 5694,
    "src": "usfs",
+   "agency": "USFS",
    "name": "May Creek Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -766,6 +868,7 @@
   {
    "id": 60366,
    "src": "usfs",
+   "agency": "USFS",
    "name": "McCart Lookout",
    "kind": "Lookout",
    "forest": "Bitterroot NF",
@@ -778,6 +881,7 @@
   {
    "id": 49906,
    "src": "usfs",
+   "agency": "USFS",
    "name": "McGuire Mountain Lookout",
    "kind": "Lookout",
    "forest": "Kootenai NF",
@@ -790,6 +894,7 @@
   {
    "id": 10103111,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Meadow Peak Lookout",
    "kind": "Lookout",
    "forest": "Kootenai NF",
@@ -802,6 +907,7 @@
   {
    "id": 60370,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Medicine Point Lookout",
    "kind": "Lookout",
    "forest": "Bitterroot NF",
@@ -814,6 +920,7 @@
   {
    "id": 60879,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Meyers Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -826,6 +933,7 @@
   {
    "id": 5647,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Mill Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -838,6 +946,7 @@
   {
    "id": 253500,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Miller Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -850,6 +959,7 @@
   {
    "id": 250012,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Minton Peak Lookout",
    "kind": "Lookout",
    "forest": "Kootenai NF",
@@ -862,6 +972,7 @@
   {
    "id": 67022,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Mission Lookout Cabin",
    "kind": "Lookout",
    "forest": "Flathead NF",
@@ -874,6 +985,7 @@
   {
    "id": 10326,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Monture Guard Station Cabin",
    "kind": "Guard station",
    "forest": "Lolo NF",
@@ -886,6 +998,7 @@
   {
    "id": 61588,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Monument Peak Lookout",
    "kind": "Lookout",
    "forest": "Helena-Lewis and Clark NF",
@@ -898,6 +1011,7 @@
   {
    "id": 62955,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Moose Creek Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -910,6 +1024,7 @@
   {
    "id": 5763,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Moose Lake Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -922,8 +1037,9 @@
   {
    "id": 10293,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Morgan-Case Homestead",
-   "kind": "Cabin",
+   "kind": "House",
    "forest": "Lolo NF",
    "status": "open",
    "lat": 46.40257,
@@ -934,6 +1050,7 @@
   {
    "id": 5648,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Mystic Lake Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -946,6 +1063,7 @@
   {
    "id": 10040589,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Nevada Creek Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -958,6 +1076,7 @@
   {
    "id": 66244,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Ninko Cabin",
    "kind": "Cabin",
    "forest": "Flathead NF",
@@ -970,6 +1089,7 @@
   {
    "id": 234321,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Notch Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -982,6 +1102,7 @@
   {
    "id": 77521,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Old Condon Ranger Station",
    "kind": "Guard station",
    "forest": "Flathead NF",
@@ -994,6 +1115,7 @@
   {
    "id": 67028,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Owl Creek Cabin",
    "kind": "Cabin",
    "forest": "Flathead NF",
@@ -1006,6 +1128,7 @@
   {
    "id": 5649,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Porcupine Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1018,6 +1141,7 @@
   {
    "id": 5764,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Racetrack Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -1030,6 +1154,7 @@
   {
    "id": 62967,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Rillway Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -1042,6 +1167,7 @@
   {
    "id": 10346418,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Sage Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1054,8 +1180,9 @@
   {
    "id": 10335,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Savenac Bunkhouse",
-   "kind": "Cabin",
+   "kind": "House",
    "forest": "Lolo NF",
    "status": "closed",
    "lat": 47.38644,
@@ -1066,8 +1193,9 @@
   {
    "id": 10336,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Savenac Cookhouse",
-   "kind": "Cabin",
+   "kind": "House",
    "forest": "Lolo NF",
    "status": "open",
    "lat": 47.38597,
@@ -1078,8 +1206,9 @@
   {
    "id": 83456,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Savenac East Cottage",
-   "kind": "Cabin",
+   "kind": "House",
    "forest": "Lolo NF",
    "status": "open",
    "lat": 47.38585,
@@ -1090,8 +1219,9 @@
   {
    "id": 10337,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Savenac West Cottage",
-   "kind": "Cabin",
+   "kind": "House",
    "forest": "Lolo NF",
    "status": "open",
    "lat": 47.38585,
@@ -1102,6 +1232,7 @@
   {
    "id": 66256,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Schnaus Cabin",
    "kind": "Cabin",
    "forest": "Flathead NF",
@@ -1114,6 +1245,7 @@
   {
    "id": 234433,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Sex Peak Lookout",
    "kind": "Lookout",
    "forest": "Kootenai NF",
@@ -1126,6 +1258,7 @@
   {
    "id": 66816,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Silvertip Cabin",
    "kind": "Cabin",
    "forest": "Flathead NF",
@@ -1138,6 +1271,7 @@
   {
    "id": 5650,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Spanish Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1150,6 +1284,7 @@
   {
    "id": 67116,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Star Meadow Guard Station Cabin",
    "kind": "Guard station",
    "forest": "Flathead NF",
@@ -1162,6 +1297,7 @@
   {
    "id": 5765,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Stony Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -1174,6 +1310,7 @@
   {
    "id": 272173,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Strawberry Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -1186,6 +1323,7 @@
   {
    "id": 77522,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Swan Guard Station",
    "kind": "Guard station",
    "forest": "Flathead NF",
@@ -1198,6 +1336,7 @@
   {
    "id": 62969,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Thompson Guard Station",
    "kind": "Guard station",
    "forest": "Helena-Lewis and Clark NF",
@@ -1210,6 +1349,7 @@
   {
    "id": 10339,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Thompson Peak Lookout",
    "kind": "Lookout",
    "forest": "Lolo NF",
@@ -1222,6 +1362,7 @@
   {
    "id": 234309,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Trail Creek Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1234,6 +1375,7 @@
   {
    "id": 5695,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Twin Lakes Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -1246,6 +1388,7 @@
   {
    "id": 60382,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Twogood Cabin",
    "kind": "Cabin",
    "forest": "Bitterroot NF",
@@ -1258,6 +1401,7 @@
   {
    "id": 10340,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Up Up 40-Foot Lookout Tower",
    "kind": "Lookout",
    "forest": "Lolo NF",
@@ -1270,6 +1414,7 @@
   {
    "id": 234388,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Upper Ford Cabin",
    "kind": "Cabin",
    "forest": "Kootenai NF",
@@ -1282,6 +1427,7 @@
   {
    "id": 5723,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Vigilante Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -1294,6 +1440,7 @@
   {
    "id": 5724,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Wall Creek Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -1306,6 +1453,7 @@
   {
    "id": 5652,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Wapiti Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1318,6 +1466,7 @@
   {
    "id": 49907,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Webb Mountain Lookout",
    "kind": "Lookout",
    "forest": "Kootenai NF",
@@ -1330,6 +1479,7 @@
   {
    "id": 5653,
    "src": "usfs",
+   "agency": "USFS",
    "name": "West Boulder Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1342,6 +1492,7 @@
   {
    "id": 5654,
    "src": "usfs",
+   "agency": "USFS",
    "name": "West Bridger Station",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1354,6 +1505,7 @@
   {
    "id": 10271,
    "src": "usfs",
+   "agency": "USFS",
    "name": "West Fork Butte Lookout",
    "kind": "Lookout",
    "forest": "Lolo NF",
@@ -1366,6 +1518,7 @@
   {
    "id": 5725,
    "src": "usfs",
+   "agency": "USFS",
    "name": "West Fork Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -1378,6 +1531,7 @@
   {
    "id": 61592,
    "src": "usfs",
+   "agency": "USFS",
    "name": "West Fork Cabin",
    "kind": "Cabin",
    "forest": "Helena-Lewis and Clark NF",
@@ -1390,6 +1544,7 @@
   {
    "id": 5766,
    "src": "usfs",
+   "agency": "USFS",
    "name": "West Fork of Rock Creek Cabin",
    "kind": "Cabin",
    "forest": "Beaverhead-Deerlodge NF",
@@ -1402,6 +1557,7 @@
   {
    "id": 60877,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Whitetail Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1414,6 +1570,7 @@
   {
    "id": 5655,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Window Rock Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1426,6 +1583,7 @@
   {
    "id": 5656,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Windy Pass Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1438,6 +1596,7 @@
   {
    "id": 60292,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Wood's Cabin",
    "kind": "Cabin",
    "forest": "Bitterroot NF",
@@ -1450,6 +1609,7 @@
   {
    "id": 66286,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Wurtz Cabin",
    "kind": "Cabin",
    "forest": "Flathead NF",
@@ -1462,6 +1622,7 @@
   {
    "id": 234387,
    "src": "recreation.gov",
+   "agency": "USFS",
    "name": "Yaak Mountain Lookout",
    "kind": "Lookout",
    "forest": "Kootenai NF",
@@ -1474,6 +1635,7 @@
   {
    "id": 5657,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Yellow Mule Cabin",
    "kind": "Cabin",
    "forest": "Custer Gallatin NF",
@@ -1486,6 +1648,7 @@
   {
    "id": 66488,
    "src": "usfs",
+   "agency": "USFS",
    "name": "Zip's Place Cabin",
    "kind": "Cabin",
    "forest": "Flathead NF",

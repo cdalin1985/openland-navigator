@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { checkAgainstPrevious } from "../scripts/build-mt-cabins.mjs";
-import { cabinSubtitle, RESERVATION_PHONE, searchCabins } from "../app/lib/cabins.ts";
+import { checkAgainstPrevious, kindOf } from "../scripts/build-mt-cabins.mjs";
+import { CABIN_KINDS, cabinSubtitle, KIND_LABEL, RESERVATION_PHONE, searchCabins } from "../app/lib/cabins.ts";
 
 const data = JSON.parse(readFileSync(new URL("../app/data/mt-cabins.json", import.meta.url), "utf8"));
 const { cabins } = data;
@@ -15,14 +15,39 @@ test("data file is internally consistent", () => {
   assert.equal(new Set(cabins.map(c => c.id)).size, cabins.length, "ids are unique");
   for (const c of cabins) {
     assert.ok(c.name && c.name === c.name.trim(), `name present: ${JSON.stringify(c.name)}`);
-    assert.ok(["Cabin", "Lookout", "Guard station"].includes(c.kind), `${c.name}: kind ${c.kind}`);
+    assert.ok(CABIN_KINDS.includes(c.kind), `${c.name}: kind ${c.kind}`);
     assert.ok(["usfs", "recreation.gov"].includes(c.src), `${c.name}: src ${c.src}`);
+    assert.ok(["USFS", "BLM"].includes(c.agency), `${c.name}: agency ${c.agency}`);
+    if (c.src === "usfs") assert.equal(c.agency, "USFS", `${c.name}: the USFS layer only holds Forest Service sites`);
     // Montana's bounding box (the build also tests the real state outline).
     assert.ok(c.lat > 44.3 && c.lat < 49.1 && c.lon > -116.1 && c.lon < -103.9, `${c.name}: coordinates ${c.lat},${c.lon}`);
     assert.ok(c.bookUrl === null || /^https:\/\/www\.recreation\.gov\/camping\/campgrounds\/\d+$/.test(c.bookUrl), `${c.name}: bookUrl ${c.bookUrl}`);
     if (!c.bookUrl) assert.equal(typeof c.note, "string");
   }
   assert.ok(cabins.filter(c => c.bookUrl).length / cabins.length > 0.95, "nearly every cabin has a verified booking link");
+});
+
+test("every rental kind sorts to its own map icon", () => {
+  assert.equal(kindOf("Garver Mountain Lookout"), "Lookout");
+  assert.equal(kindOf("Diamond Butte Lookout/Cabin"), "Lookout");
+  assert.equal(kindOf("Fairview Ranger Station"), "Guard station");
+  assert.equal(kindOf("Bend Guard Station"), "Guard station");
+  for (const n of ["Bear Creek Bunkhouse", "Savenac Cookhouse", "Savenac East Cottage", "Hogback Homestead", "Henneberry House"]) assert.equal(kindOf(n), "House", n);
+  // "Station" alone is a rental cabin (the Forest Service calls Antone Station "the Antone Cabin").
+  assert.equal(kindOf("Antone Station"), "Cabin");
+  assert.equal(kindOf("Anna Creek Cabin"), "Cabin");
+  for (const k of CABIN_KINDS) assert.ok(cabins.some(c => c.kind === k), `the data has at least one ${k}`);
+  assert.equal(KIND_LABEL.Lookout, "Fire lookout");
+});
+
+test("BLM rentals are included and labelled as BLM, with verified links", () => {
+  const blm = cabins.filter(c => c.agency === "BLM");
+  assert.ok(blm.length >= 3, `expected the BLM Montana rentals, got ${blm.map(c => c.name)}`);
+  for (const c of blm) {
+    assert.equal(c.forest, "Bureau of Land Management");
+    assert.ok(c.bookUrl, `${c.name} has a verified booking link`);
+  }
+  assert.ok(blm.some(c => /Garnet Ghost Town/.test(c.name)));
 });
 
 test("campgrounds and information-only listings are not presented as rentable cabins", () => {
@@ -54,11 +79,11 @@ test("a cabin with no verified booking link says so instead of inventing one", (
 });
 
 const sample = [
-  { id: 1, src: "usfs", name: "Hogback Homestead", kind: "Cabin", forest: "Lolo NF", status: "open", lat: 46.4, lon: -113.7, bookUrl: null, note: "" },
-  { id: 2, src: "usfs", name: "Wood's Cabin", kind: "Cabin", forest: "Bitterroot NF", status: "open", lat: 46.0, lon: -114.0, bookUrl: null, note: "" },
-  { id: 3, src: "usfs", name: "Garnet Mountain Lookout", kind: "Lookout", forest: "Custer Gallatin NF", status: "open", lat: 45.3, lon: -111.2, bookUrl: null, note: "" },
-  { id: 4, src: "usfs", name: "Rillway Cabin", kind: "Cabin", forest: "Helena-Lewis and Clark NF", status: "open", lat: 47.0, lon: -112.0, bookUrl: null, note: "" },
-  { id: 5, src: "usfs", name: "Garnet Pass Cabin", kind: "Cabin", forest: "Lolo NF", status: "open", lat: 46.8, lon: -113.4, bookUrl: null, note: "" },
+  { id: 1, src: "usfs", agency: "USFS", name: "Hogback Homestead", kind: "House", forest: "Lolo NF", status: "open", lat: 46.4, lon: -113.7, bookUrl: null, note: "" },
+  { id: 2, src: "usfs", agency: "USFS", name: "Wood's Cabin", kind: "Cabin", forest: "Bitterroot NF", status: "open", lat: 46.0, lon: -114.0, bookUrl: null, note: "" },
+  { id: 3, src: "usfs", agency: "USFS", name: "Garnet Mountain Lookout", kind: "Lookout", forest: "Custer Gallatin NF", status: "open", lat: 45.3, lon: -111.2, bookUrl: null, note: "" },
+  { id: 4, src: "usfs", agency: "USFS", name: "Rillway Cabin", kind: "Cabin", forest: "Helena-Lewis and Clark NF", status: "open", lat: 47.0, lon: -112.0, bookUrl: null, note: "" },
+  { id: 5, src: "usfs", agency: "USFS", name: "Garnet Pass Cabin", kind: "Cabin", forest: "Lolo NF", status: "open", lat: 46.8, lon: -113.4, bookUrl: null, note: "" },
 ];
 
 test("search matches partial names, ignoring case and apostrophes", () => {
@@ -74,6 +99,7 @@ test("search ranks the name that starts with the query first", () => {
 
 test("a kind word finds that kind", () => {
   assert.deepEqual(searchCabins(sample, "lookout").map(c => c.id), [3]);
+  assert.deepEqual(searchCabins(sample, "fire lookout").map(c => c.id), [3], "the on-screen label works too");
 });
 
 test("a town search does not return every cabin in the forest named after it", () => {
@@ -99,7 +125,7 @@ test("real data: well-known cabins can be found by name", () => {
 });
 
 test("subtitle and phone helpers", () => {
-  assert.equal(cabinSubtitle(sample[2]), "Lookout · Custer Gallatin NF");
+  assert.equal(cabinSubtitle(sample[2]), "Fire lookout · Custer Gallatin NF");
   assert.equal(RESERVATION_PHONE, "1-877-444-6777");
 });
 

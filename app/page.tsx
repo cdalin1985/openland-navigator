@@ -13,8 +13,10 @@ import VectorLayer from "ol/layer/Vector";
 import XYZ from "ol/source/XYZ";
 import ImageArcGISRest from "ol/source/ImageArcGISRest";
 import VectorSource from "ol/source/Vector";
+import Cluster from "ol/source/Cluster";
+import { boundingExtent, getHeight, getWidth } from "ol/extent";
 import { fromLonLat, toLonLat, transformExtent } from "ol/proj";
-import { Circle, Fill, Icon, Stroke, Style } from "ol/style";
+import { Circle, Fill, Stroke, Style } from "ol/style";
 import "ol/ol.css";
 import Attribution from "ol/control/Attribution";
 import type BaseLayer from "ol/layer/Base";
@@ -28,20 +30,12 @@ import { checkLandSmart, loadAllAreas, offlineFlowlines, type BBox } from "./lib
 import OfflineAreas from "./components/OfflineAreas";
 import Polygon from "ol/geom/Polygon";
 import cabinData from "./data/mt-cabins.json";
-import { RESERVATION_PHONE, cabinSubtitle, searchCabins, type Cabin, type CabinData } from "./lib/cabins";
+import { CABIN_KINDS, KIND_LABEL, RESERVATION_PHONE, cabinSubtitle, searchCabins, type Cabin, type CabinData } from "./lib/cabins";
+import { MARKER_MIN_ZOOM, loadClaimMarkers, markerNote, type ClaimMarker } from "./lib/claim-markers";
+import { CLAIM_ICON, RENTAL_ICON } from "./lib/map-icons";
+import { claimClusterStyle, rentalStyle } from "./lib/map-styles";
 
 const CABINS = (cabinData as unknown as CabinData).cabins;
-const CABIN_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='36' height='36' viewBox='0 0 36 36'><circle cx='18' cy='18' r='15' fill='#7c3aed' stroke='#fff' stroke-width='3'/><path d='M18 8 L8 17 H11 V27 H25 V17 Z' fill='#fff'/><rect x='15.5' y='20' width='5' height='7' fill='#7c3aed'/></svg>";
-const CABIN_ICON = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(CABIN_SVG);
-const cabinIcon = (scale: number) => new Icon({ src: CABIN_ICON, scale });
-const CABIN_STYLES = {
-  small: new Style({ image: cabinIcon(0.55), zIndex: 30 }),
-  normal: new Style({ image: cabinIcon(0.8), zIndex: 30 }),
-  selected: [
-    new Style({ image: new Circle({ radius: 24, stroke: new Stroke({ color: "#facc15", width: 4 }), fill: new Fill({ color: "rgba(250,204,21,0.25)" }) }), zIndex: 31 }),
-    new Style({ image: cabinIcon(1), zIndex: 32 }),
-  ],
-};
 
 const HALF_LABEL: Record<Half, string> = { N: "N½", S: "S½", E: "E½", W: "W½" };
 type StakeSnap = { half: Half; description: string; acres: number };
@@ -110,6 +104,13 @@ export default function Home() {
   const overlays = useRef<Record<string, BaseLayer>>({});
   const inspectRef = useRef<((lon: number, lat: number) => void) | null>(null);
   const cabinSource = useRef(new VectorSource());
+  // Claim icons: one point per BLM claim in view, clustered on the map.
+  const activeClaimSource = useRef(new VectorSource());
+  const closedClaimSource = useRef(new VectorSource());
+  const claimIconLayers = useRef<Record<string, BaseLayer>>({});
+  /** Which claim icon layers are switched on (read by the map's move handler). */
+  const claimIconsWanted = useRef({ claims: true, closedClaims: true });
+  const refreshClaimIcons = useRef<(() => void) | null>(null);
   const selectCabinRef = useRef<((cabin: Cabin) => void) | null>(null);
   const selectedCabinId = useRef<number | null>(null);
   const labelLayers = useRef<Array<ImageLayer<ImageArcGISRest> | TileLayer<XYZ>>>([]);
@@ -126,6 +127,7 @@ export default function Home() {
   const [parcel, setParcel] = useState<Parcel | null>(null);
   const [parcelOpen, setParcelOpen] = useState(false);
   const [selectedCabin, setSelectedCabin] = useState<Cabin | null>(null);
+  const [claimIconNote, setClaimIconNote] = useState("");
   const [parcelMessage, setParcelMessage] = useState("");
   const [claim, setClaim] = useState<MiningClaim | null>(null);
   const [activeClaimsList, setActiveClaimsList] = useState<MiningClaim[]>([]);
@@ -444,8 +446,18 @@ export default function Home() {
     const cabinLayer = new VectorLayer({
       source: cabinSource.current,
       zIndex: 20,
-      style: f => f.get("selected") ? CABIN_STYLES.selected : (map.current?.getView().getZoom() ?? 11) < 8 ? CABIN_STYLES.small : CABIN_STYLES.normal,
+      style: f => rentalStyle((f.get("cabin") as Cabin).kind, f.get("selected") ? "selected" : (map.current?.getView().getZoom() ?? 11) < 8 ? "small" : "normal"),
     });
+    // Claim icons sit under the rental icons; closed claims above active ones because they're rarer.
+    const activeClaimIcons = new VectorLayer({
+      source: new Cluster({ distance: 34, source: activeClaimSource.current }),
+      style: claimClusterStyle("active"), minZoom: MARKER_MIN_ZOOM, zIndex: 18,
+    });
+    const closedClaimIcons = new VectorLayer({
+      source: new Cluster({ distance: 34, source: closedClaimSource.current }),
+      style: claimClusterStyle("closed"), minZoom: MARKER_MIN_ZOOM, zIndex: 19,
+    });
+    claimIconLayers.current = { claims: activeClaimIcons, closedClaims: closedClaimIcons };
     overlays.current = { closedClaims, parcels, public: publicLand, easements, claims, places: lowZoomReference, water: hydroLabels, roads: roadLabels, mvum, peaks: geographicNames, cabins: cabinLayer };
     labelLayers.current = [lowZoomReference, hydroLabels, roadLabels, geographicNames];
     const vector = new VectorLayer({
@@ -474,7 +486,7 @@ export default function Home() {
     const instance = new Map({
       target: target.current,
       controls: [new Attribution({ collapsible: false })],
-      layers: [usgsImagery, naip, topo, publicLand, easements, claims, closedClaims, parcels, lowZoomReference, hydroLabels, roadLabels, mvum, geographicNames, offlineLayer, cabinLayer, vector],
+      layers: [usgsImagery, naip, topo, publicLand, easements, claims, closedClaims, parcels, lowZoomReference, hydroLabels, roadLabels, mvum, geographicNames, offlineLayer, activeClaimIcons, closedClaimIcons, cabinLayer, vector],
       view: new View({ center: fromLonLat([-112.035, 46.685]), zoom: 11.2, minZoom: 5, maxZoom: 20 }),
     });
     const runInspect = async (lon: number, lat: number) => {
@@ -533,21 +545,77 @@ export default function Home() {
       view.animate({ center: fromLonLat([cabin.lon, cabin.lat]), zoom: Math.max(view.getZoom() ?? 0, 11), duration: 600 });
     };
     selectCabinRef.current = selectCabin;
-    const cabinHit = { layerFilter: (l: BaseLayer) => l === cabinLayer };
+    const iconLayers: BaseLayer[] = [cabinLayer, activeClaimIcons, closedClaimIcons];
+    const iconHit = { layerFilter: (l: BaseLayer) => iconLayers.includes(l) };
     instance.on("pointermove", e => {
       if (e.dragging) return;
       const el = instance.getTargetElement();
-      if (el) el.style.cursor = instance.hasFeatureAtPixel(e.pixel, { ...cabinHit, hitTolerance: 6 }) ? "pointer" : "";
+      if (el) el.style.cursor = instance.hasFeatureAtPixel(e.pixel, { ...iconHit, hitTolerance: 6 }) ? "pointer" : "";
     });
     instance.on("singleclick", async e => {
-      const hit = instance.forEachFeatureAtPixel(e.pixel, f => f, { ...cabinHit, hitTolerance: 10 });
+      const hit = instance.forEachFeatureAtPixel(e.pixel, f => f, { ...iconHit, hitTolerance: 10 });
       const hitCabin = hit?.get("cabin") as Cabin | undefined;
       if (hitCabin) { selectCabin(hitCabin); return; }
+      const members = hit?.get("features") as Feature[] | undefined;
+      if (members?.length) {
+        // A claim icon or a count. Spread-out counts zoom in; a single claim, or claims BLM
+        // mapped to the same survey square, get the full land check at the claim.
+        const points = members.map(m => (m.getGeometry() as Point).getCoordinates());
+        const spread = boundingExtent(points);
+        const view = instance.getView();
+        if (members.length > 1 && Math.max(getWidth(spread), getHeight(spread)) > 5 && (view.getZoom() ?? 0) < 16) {
+          view.fit(spread, { padding: [120, 80, 200, 80], maxZoom: 16, duration: 500 });
+          return;
+        }
+        const nearest = members.reduce((best, m) => {
+          const [x, y] = (m.getGeometry() as Point).getCoordinates();
+          const d = (x - e.coordinate[0]) ** 2 + (y - e.coordinate[1]) ** 2;
+          return d < best.d ? { m, d } : best;
+        }, { m: members[0], d: Infinity }).m;
+        const marker = nearest.get("marker") as ClaimMarker;
+        clearCabinSelection();
+        await runInspect(marker.lon, marker.lat);
+        return;
+      }
       clearCabinSelection();
       const [lon, lat] = toLonLat(e.coordinate);
       await runInspect(lon, lat);
     });
     map.current = instance;
+
+    // Load claim icons for the view after each pan/zoom (debounced; a newer move cancels an older load).
+    let iconTimer: number | undefined;
+    let iconAbort: AbortController | null = null;
+    let loaded: { bbox: BBox; zoom: number; want: string } | null = null;
+    const loadIcons = () => {
+      window.clearTimeout(iconTimer);
+      iconTimer = window.setTimeout(async () => {
+        const zoom = instance.getView().getZoom() ?? 0;
+        const want = { active: claimIconsWanted.current.claims, closed: claimIconsWanted.current.closedClaims };
+        if (zoom < MARKER_MIN_ZOOM || (!want.active && !want.closed) || !navigator.onLine) {
+          iconAbort?.abort(); setClaimIconNote(""); return;
+        }
+        const [minX, minY, maxX, maxY] = transformExtent(instance.getView().calculateExtent(instance.getSize()), "EPSG:3857", "EPSG:4326");
+        const wantKey = `${want.active}/${want.closed}`;
+        // Skip when the last load already covers this view at a similar detail level.
+        if (loaded && loaded.want === wantKey && zoom - loaded.zoom < 2 && minX >= loaded.bbox[0] && minY >= loaded.bbox[1] && maxX <= loaded.bbox[2] && maxY <= loaded.bbox[3]) return;
+        const padX = (maxX - minX) * 0.25, padY = (maxY - minY) * 0.25;
+        const bbox: BBox = [minX - padX, minY - padY, maxX + padX, maxY + padY];
+        iconAbort?.abort();
+        const controller = new AbortController();
+        iconAbort = controller;
+        const r = await loadClaimMarkers(bbox, zoom, want, controller.signal);
+        if (controller.signal.aborted) return;
+        const toFeature = (m: ClaimMarker) => { const f = new Feature(new Point(fromLonLat([m.lon, m.lat]))); f.set("marker", m); return f; };
+        // Replace a layer's icons only when its lookup worked, so a failed load never wipes icons to "none".
+        if (!r.failed.includes("active")) { activeClaimSource.current.clear(); activeClaimSource.current.addFeatures(r.active.map(toFeature)); }
+        if (!r.failed.includes("closed")) { closedClaimSource.current.clear(); closedClaimSource.current.addFeatures(r.closed.map(toFeature)); }
+        loaded = r.failed.length || (want.closed && !r.coverChecked) ? null : { bbox, zoom, want: wantKey };
+        setClaimIconNote(markerNote(r));
+      }, 300);
+    };
+    instance.on("moveend", loadIcons);
+    refreshClaimIcons.current = loadIcons;
     void (async () => {
       try {
         const config = await (await fetch("/api/google/config")).json() as { enabled?: boolean; key?: string };
@@ -587,7 +655,7 @@ export default function Home() {
         setGoogleMaps(false);
       }
     })();
-    return () => { inspectAbort.current?.abort(); window.clearTimeout(stakeTimer.current); instance.setTarget(undefined); map.current = null; };
+    return () => { inspectAbort.current?.abort(); iconAbort?.abort(); window.clearTimeout(iconTimer); window.clearTimeout(stakeTimer.current); instance.setTarget(undefined); map.current = null; };
   }, []);
 
   useEffect(() => {
@@ -688,6 +756,11 @@ export default function Home() {
     const next = !active[key];
     setActive(a => ({ ...a, [key]: next }));
     overlays.current[key]?.setVisible(next);
+    if (key === "claims" || key === "closedClaims") {
+      claimIconLayers.current[key]?.setVisible(next);
+      claimIconsWanted.current[key] = next;
+      refreshClaimIcons.current?.();
+    }
   }
 
   function locate() {
@@ -717,7 +790,7 @@ export default function Home() {
         }
       }
       const cabinResults: Place[] = searchCabins(CABINS, query, 5).map(c => ({
-        id: "cabin-" + c.id, name: c.name, address: cabinSubtitle(c), lat: c.lat, lon: c.lon, category: "Forest Service cabin", cabinId: c.id,
+        id: "cabin-" + c.id, name: c.name, address: cabinSubtitle(c), lat: c.lat, lon: c.lon, category: c.agency === "BLM" ? "BLM rental" : "Forest Service rental", cabinId: c.id,
       }));
       const p = new URLSearchParams({ q: query, format: "jsonv2", limit: "5", countrycodes: "us", viewbox: "-116.05,49.0,-104.04,44.36", bounded: "0" });
       try {
@@ -969,17 +1042,16 @@ export default function Home() {
             </div>
             
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {/* 0. Forest Service cabins */}
-              <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", background: "rgba(255,255,255,0.04)", padding: "6px 8px", borderRadius: "8px" }}>
-                <span style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={CABIN_ICON} alt="" width={22} height={22} style={{ flexShrink: 0 }} />
+              {/* 0. Rentals: Forest Service + BLM cabins, lookouts, guard stations, bunkhouses */}
+              <label style={{ display: "flex", flexDirection: "column", gap: "6px", cursor: "pointer", background: "rgba(255,255,255,0.04)", padding: "6px 8px", borderRadius: "8px" }}>
+                <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", fontSize: "12px" }}>
                   <span>
-                    <strong style={{ color: "#c4b5fd" }}>Forest Service cabins</strong>
-                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>Tap one for the rental link</small>
+                    <strong style={{ color: "#c4b5fd" }}>Rental cabins &amp; lookouts</strong>
+                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>Forest Service &amp; BLM · tap one for the rental link</small>
                   </span>
+                  <input type="checkbox" checked={active.cabins} onChange={() => toggle("cabins")} style={{ accentColor: "#7c3aed", width: "16px", height: "16px", cursor: "pointer" }} />
                 </span>
-                <input type="checkbox" checked={active.cabins} onChange={() => toggle("cabins")} style={{ accentColor: "#7c3aed", width: "16px", height: "16px", cursor: "pointer" }} />
+                <KeyIcons items={CABIN_KINDS.map(k => [RENTAL_ICON[k], KIND_LABEL[k]])} />
               </label>
 
               {/* 1. Open BLM Land */}
@@ -997,10 +1069,11 @@ export default function Home() {
               {/* 2. Active Claims */}
               <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", background: "rgba(255,255,255,0.04)", padding: "6px 8px", borderRadius: "8px" }}>
                 <span style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
-                  <span style={{ width: "14px", height: "14px", background: "#ff00b7", borderRadius: "3px", border: "1px solid #fff", flexShrink: 0 }} />
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={CLAIM_ICON.active.placer} alt="" width={20} height={20} style={{ flexShrink: 0 }} />
                   <span>
                     <strong style={{ color: "#f472b6" }}>Already Taken</strong>
-                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>🛑 Claimed — don&apos;t dig without permission</small>
+                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>🛑 Pink areas &amp; circles — don&apos;t dig without permission</small>
                   </span>
                 </span>
                 <input type="checkbox" checked={active.claims} onChange={() => toggle("claims")} style={{ accentColor: "#ff00b7", width: "16px", height: "16px", cursor: "pointer" }} />
@@ -1009,14 +1082,19 @@ export default function Home() {
               {/* 3. Lapsed Claims */}
               <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", background: "rgba(255,255,255,0.04)", padding: "6px 8px", borderRadius: "8px" }}>
                 <span style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
-                  <span style={{ width: "14px", height: "14px", background: "#06b6d4", borderRadius: "3px", border: "1px solid #fff", flexShrink: 0 }} />
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={CLAIM_ICON.closed.placer} alt="" width={20} height={20} style={{ flexShrink: 0 }} />
                   <span>
                     <strong style={{ color: "#38bdf8" }}>Closed Claims</strong>
-                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>Closed — research before restaking</small>
+                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>Cyan squares: no active claim on it in BLM&apos;s map · grey: one is. Research before restaking</small>
                   </span>
                 </span>
                 <input type="checkbox" checked={active.closedClaims} onChange={() => toggle("closedClaims")} style={{ accentColor: "#06b6d4", width: "16px", height: "16px", cursor: "pointer" }} />
               </label>
+              <div style={{ padding: "0 8px" }}>
+                <KeyIcons items={[[CLAIM_ICON.active.placer, "Placer claim"], [CLAIM_ICON.active.lode, "Lode claim"], [CLAIM_ICON.active.millsite, "Mill site"], [CLAIM_ICON.active.tunnel, "Tunnel site"]]} />
+                <small style={{ display: "block", color: "#94a3b8", fontSize: "9.5px", marginTop: "4px" }}>Claim icons show from zoom 11 in. A number = several claims; BLM often maps claims to the same survey square.</small>
+              </div>
 
               {/* 4. Private Property */}
               <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", background: "rgba(255,255,255,0.04)", padding: "6px 8px", borderRadius: "8px" }}>
@@ -1079,6 +1157,7 @@ export default function Home() {
       <form onSubmit={search}><span>⌕</span><input aria-label="Search" placeholder="Where to? Address, place or coordinates" value={query} onChange={e => setQuery(e.target.value)} /><button>{busy ? "…" : "Go"}</button></form>
       <button className="icon" aria-label="Layers" onClick={() => { setNavTab("explore"); setLayers(v => !v); }}>▱</button>
     </header>
+    {claimIconNote && !isOffline && <div className="icon-note" role="status">{claimIconNote}</div>}
     <div className="live"><i/> {isOffline ? "📴 OFFLINE · USING SAVED AREAS" : <>LIVE PUBLIC DATA · MONTANA · {base === "usgs" ? "USGS IMAGERY" : base === "topo" ? "USGS TOPO" : "GOOGLE MAPS"}</>}</div>
     <div className="tools"><button aria-label="My location" onClick={locate}>⌾</button><button aria-label="Zoom in" onClick={() => map.current?.getView().adjustZoom(1)}>＋</button><button aria-label="Zoom out" onClick={() => map.current?.getView().adjustZoom(-1)}>−</button></div>
 
@@ -1090,7 +1169,7 @@ export default function Home() {
         {googleMaps && <button className={base === "google" ? "selected sat" : "sat"} onClick={() => setBase("google")}><b>Google</b><span>Satellite</span></button>}
       </div>
       <h3>MAP REFERENCE</h3>
-      <Layer color="#7c3aed" title="Forest Service cabins" sub="Rentable cabins, lookouts & guard stations" on={active.cabins} click={() => toggle("cabins")} />
+      <Layer color="#7c3aed" title="Rental cabins & lookouts" sub="Forest Service & BLM cabins, fire lookouts, guard stations & bunkhouses" on={active.cabins} click={() => toggle("cabins")} />
       <Layer color="#ffffff" title="Cities & towns" sub="Towns, places & county labels" on={active.places} click={() => toggle("places")} />
       <Layer color="#ff9f43" title="Roads & highways" sub="Interstates, highways & road numbers" on={active.roads} click={() => toggle("roads")} />
       <Layer color="#54a0ff" title="Rivers, creeks & lakes" sub="Waterways, ditches & reservoirs" on={active.water} click={() => toggle("water")} />
@@ -1099,8 +1178,8 @@ export default function Home() {
       <h3>LAND INTELLIGENCE</h3>
       <Layer color="#ff8800" title="Private Property" sub="Orange grid · Private land (not claimable)" on={active.parcels} click={() => toggle("parcels")} />
       <Layer color="#f59e0b" title="Public Lands" sub="Yellow = BLM · Green = USFS · Blue = State (pale yellow = Reclamation, darker green = Fish & Wildlife)" on={active.public} click={() => toggle("public")} />
-      <Layer color="#06b6d4" title="Closed Claims" sub="Cyan · Closed in BLM records — research before restaking" on={active.closedClaims} click={() => toggle("closedClaims")} />
-      <Layer color="#ff00b7" title="Active Mining Claims" sub="Pink areas · Staked claims recorded with BLM" on={active.claims} click={() => toggle("claims")} />
+      <Layer color="#06b6d4" title="Closed Claims" sub="Cyan areas & square icons · Closed in BLM records — research before restaking" on={active.closedClaims} click={() => toggle("closedClaims")} />
+      <Layer color="#ff00b7" title="Active Mining Claims" sub="Pink areas & round icons · Staked claims recorded with BLM" on={active.claims} click={() => toggle("claims")} />
       <Layer color="#a855f7" title="Conservation Easements" sub="Purple areas · Protected land" on={active.easements} click={() => toggle("easements")} />
       <div className="legend" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", fontSize: "11px", marginTop: "12px", background: "rgba(0,0,0,0.3)", padding: "10px", borderRadius: "8px" }}>
         <span><span style={{ display: "inline-block", width: "12px", height: "12px", background: "#f59e0b", borderRadius: "2px", marginRight: "6px" }}/><b>Yellow:</b> BLM</span>
@@ -1132,7 +1211,7 @@ export default function Home() {
 
     {selectedCabin && !parcelOpen && !claimOpen && <aside className="panel parcel claim-card cabin-card">
       <button className="close" onClick={() => { clearCabinSelection(); }}>×</button>
-      <small>{selectedCabin.kind.toUpperCase()} · FOREST SERVICE</small>
+      <small>{(KIND_LABEL[selectedCabin.kind] ?? selectedCabin.kind).toUpperCase()} · {selectedCabin.agency === "BLM" ? "BUREAU OF LAND MANAGEMENT" : "FOREST SERVICE"}</small>
       <h2>{selectedCabin.name}</h2>
       <p>{cabinSubtitle(selectedCabin)}</p>
       {(selectedCabin.status === "closed" || selectedCabin.status === "temporarily closed") && <p style={{ background: "#78350f", color: "#fde68a", padding: "6px 10px", borderRadius: "8px", fontSize: "12px" }}>Listed as {selectedCabin.status} by the Forest Service — check before you go</p>}
@@ -1146,7 +1225,7 @@ export default function Home() {
       </>}
       <button className="panel-save" onClick={() => saveLocation(selectedCabin.name, "place", selectedCabin.lon, selectedCabin.lat)}>☆ Save</button>
       <button className="panel-route" onClick={() => openDirections(selectedCabin.lat, selectedCabin.lon)}>Directions ➜</button>
-      <p className="record-note">Data: USDA Forest Service & Recreation.gov, checked {(cabinData as unknown as CabinData).generatedAt}.</p>
+      <p className="record-note">Data: USDA Forest Service, BLM &amp; Recreation.gov, checked {(cabinData as unknown as CabinData).generatedAt}.</p>
     </aside>}
 
     {parcelOpen && <aside className="panel parcel">
@@ -1301,7 +1380,7 @@ export default function Home() {
       <p style={{ margin: "4px 14px", fontSize: "10px", color: "#94a3b8" }}>Search © OpenStreetMap contributors (Nominatim)</p>
       {searchMessage && <p style={{ margin: "8px 14px", fontSize: "12px" }}>{searchMessage}</p>}
       <div className="results-list">{placeResults.map(place => <button key={place.id} onClick={() => choosePlace(place)}>
-        <span><b>{place.name}{place.cabinId != null && <i style={{ display: "inline-block", fontStyle: "normal", flex: "none", marginLeft: "6px", background: "#7c3aed", color: "#fff", fontSize: "9px", fontWeight: 800, padding: "1px 5px", borderRadius: "4px", verticalAlign: "middle" }}>CABIN</i>}</b><small>{place.category} · {place.address}</small></span>
+        <span><b>{place.name}{place.cabinId != null && <i style={{ display: "inline-block", fontStyle: "normal", flex: "none", marginLeft: "6px", background: "#7c3aed", color: "#fff", fontSize: "9px", fontWeight: 800, padding: "1px 5px", borderRadius: "4px", verticalAlign: "middle" }}>RENTAL</i>}</b><small>{place.category} · {place.address}</small></span>
         <em>›</em>
       </button>)}</div>
     </section>}
@@ -1360,6 +1439,16 @@ async function createGoogleTileSession(key: string) {
   const data = await response.json() as { session?: string };
   if (!data.session) throw new Error("Google tile session missing");
   return data.session;
+}
+
+/** A row of small map icons with labels, for the map key. */
+function KeyIcons({ items }: { items: Array<[string, string]> }) {
+  return <span style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 8px" }}>
+    {items.map(([src, label]) => <span key={label} style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "10px", color: "#cbd5e1" }}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={src} alt="" width={18} height={18} style={{ flexShrink: 0 }} />{label}
+    </span>)}
+  </span>;
 }
 
 function Layer({ color, title, sub, on, click }: { color: string; title: string; sub: string; on: boolean; click: () => void }) {
