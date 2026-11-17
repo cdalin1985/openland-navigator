@@ -14,7 +14,7 @@ import XYZ from "ol/source/XYZ";
 import ImageArcGISRest from "ol/source/ImageArcGISRest";
 import VectorSource from "ol/source/Vector";
 import { fromLonLat, toLonLat, transformExtent } from "ol/proj";
-import { Circle, Fill, Stroke, Style } from "ol/style";
+import { Circle, Fill, Icon, Stroke, Style } from "ol/style";
 import "ol/ol.css";
 import Attribution from "ol/control/Attribution";
 import type BaseLayer from "ol/layer/Base";
@@ -27,6 +27,21 @@ import {
 import { checkLandSmart, loadAllAreas, offlineFlowlines, type BBox } from "./lib/offline";
 import OfflineAreas from "./components/OfflineAreas";
 import Polygon from "ol/geom/Polygon";
+import cabinData from "./data/mt-cabins.json";
+import { RESERVATION_PHONE, cabinSubtitle, searchCabins, type Cabin, type CabinData } from "./lib/cabins";
+
+const CABINS = (cabinData as unknown as CabinData).cabins;
+const CABIN_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='36' height='36' viewBox='0 0 36 36'><circle cx='18' cy='18' r='15' fill='#7c3aed' stroke='#fff' stroke-width='3'/><path d='M18 8 L8 17 H11 V27 H25 V17 Z' fill='#fff'/><rect x='15.5' y='20' width='5' height='7' fill='#7c3aed'/></svg>";
+const CABIN_ICON = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(CABIN_SVG);
+const cabinIcon = (scale: number) => new Icon({ src: CABIN_ICON, scale });
+const CABIN_STYLES = {
+  small: new Style({ image: cabinIcon(0.55), zIndex: 30 }),
+  normal: new Style({ image: cabinIcon(0.8), zIndex: 30 }),
+  selected: [
+    new Style({ image: new Circle({ radius: 24, stroke: new Stroke({ color: "#facc15", width: 4 }), fill: new Fill({ color: "rgba(250,204,21,0.25)" }) }), zIndex: 31 }),
+    new Style({ image: cabinIcon(1), zIndex: 32 }),
+  ],
+};
 
 const HALF_LABEL: Record<Half, string> = { N: "N½", S: "S½", E: "E½", W: "W½" };
 type StakeSnap = { half: Half; description: string; acres: number };
@@ -39,7 +54,7 @@ type Parcel = {
 };
 type Destination = { display_name: string; lon: string; lat: string };
 type Place = {
-  id: string; name: string; address: string; lat: number; lon: number; category: string;
+  id: string; name: string; address: string; lat: number; lon: number; category: string; cabinId?: number;
 };
 type MiningClaim = {
   CSE_NAME?: string; CSE_DISP?: string; BLM_PROD?: string; CSE_NR?: string;
@@ -94,6 +109,9 @@ export default function Home() {
   const [isOffline, setIsOffline] = useState(false);
   const overlays = useRef<Record<string, BaseLayer>>({});
   const inspectRef = useRef<((lon: number, lat: number) => void) | null>(null);
+  const cabinSource = useRef(new VectorSource());
+  const selectCabinRef = useRef<((cabin: Cabin) => void) | null>(null);
+  const selectedCabinId = useRef<number | null>(null);
   const labelLayers = useRef<Array<ImageLayer<ImageArcGISRest> | TileLayer<XYZ>>>([]);
   const baseLayers = useRef<Record<string, BaseLayer>>({});
   const googleCopyright = useRef<(() => void) | null>(null);
@@ -104,9 +122,10 @@ export default function Home() {
   const [base, setBase] = useState<"usgs" | "topo" | "google">("usgs");
   const [layers, setLayers] = useState(false);
   const [keyOpen, setKeyOpen] = useState(true);
-  const [active, setActive] = useState({ closedClaims: true, mvum: true, parcels: false, public: true, easements: false, claims: true, places: true, roads: true, water: true, peaks: true });
+  const [active, setActive] = useState({ cabins: true, closedClaims: true, mvum: true, parcels: false, public: true, easements: false, claims: true, places: true, roads: true, water: true, peaks: true });
   const [parcel, setParcel] = useState<Parcel | null>(null);
   const [parcelOpen, setParcelOpen] = useState(false);
+  const [selectedCabin, setSelectedCabin] = useState<Cabin | null>(null);
   const [parcelMessage, setParcelMessage] = useState("");
   const [claim, setClaim] = useState<MiningClaim | null>(null);
   const [activeClaimsList, setActiveClaimsList] = useState<MiningClaim[]>([]);
@@ -323,6 +342,13 @@ export default function Home() {
       .catch(() => setStakeCopied(false));
   }
 
+  function clearCabinSelection() {
+    setSelectedCabin(null);
+    selectedCabinId.current = null;
+    cabinSource.current.getFeatures().forEach(f => f.set("selected", false));
+    cabinSource.current.changed();
+  }
+
   useEffect(() => {
     if (!target.current) return;
     const usgsImagery = new TileLayer({
@@ -415,7 +441,12 @@ export default function Home() {
       }),
       minZoom: 11,
     });
-    overlays.current = { closedClaims, parcels, public: publicLand, easements, claims, places: lowZoomReference, water: hydroLabels, roads: roadLabels, mvum, peaks: geographicNames };
+    const cabinLayer = new VectorLayer({
+      source: cabinSource.current,
+      zIndex: 20,
+      style: f => f.get("selected") ? CABIN_STYLES.selected : (map.current?.getView().getZoom() ?? 11) < 8 ? CABIN_STYLES.small : CABIN_STYLES.normal,
+    });
+    overlays.current = { closedClaims, parcels, public: publicLand, easements, claims, places: lowZoomReference, water: hydroLabels, roads: roadLabels, mvum, peaks: geographicNames, cabins: cabinLayer };
     labelLayers.current = [lowZoomReference, hydroLabels, roadLabels, geographicNames];
     const vector = new VectorLayer({
       source: vectors.current,
@@ -434,10 +465,16 @@ export default function Home() {
         ? new Style({ stroke: new Stroke({ color: "#ff00b7", width: 2 }), fill: new Fill({ color: "rgba(255,0,183,0.10)" }) })
         : new Style({ stroke: new Stroke({ color: "#ef4444", width: 2, lineDash: [6, 4] }), fill: new Fill({ color: "rgba(239,68,68,0.08)" }) }),
     });
+    cabinSource.current.clear();
+    cabinSource.current.addFeatures(CABINS.map(c => {
+      const f = new Feature(new Point(fromLonLat([c.lon, c.lat])));
+      f.set("kind", "cabin"); f.set("cabin", c);
+      return f;
+    }));
     const instance = new Map({
       target: target.current,
       controls: [new Attribution({ collapsible: false })],
-      layers: [usgsImagery, naip, topo, publicLand, easements, claims, closedClaims, parcels, lowZoomReference, hydroLabels, roadLabels, mvum, geographicNames, offlineLayer, vector],
+      layers: [usgsImagery, naip, topo, publicLand, easements, claims, closedClaims, parcels, lowZoomReference, hydroLabels, roadLabels, mvum, geographicNames, offlineLayer, cabinLayer, vector],
       view: new View({ center: fromLonLat([-112.035, 46.685]), zoom: 11.2, minZoom: 5, maxZoom: 20 }),
     });
     const runInspect = async (lon: number, lat: number) => {
@@ -463,6 +500,7 @@ export default function Home() {
       vectors.current.addFeature(tapPin);
 
       setParcel(null); setClaim(null); setActiveClaimsList([]); setLapsedClaimsList([]); setLandCheck(null);
+      clearCabinSelection();
       setClaimOpen(false); setParcelOpen(true); setSelectedPlace(null); setPlaceResults([]);
       setParcelMessage("Checking BLM claims and land ownership…");
       setMinerals(null); setMineralsError(""); setMineralsLoading(true);
@@ -484,7 +522,28 @@ export default function Home() {
     };
     inspectRef.current = runInspect;
 
+    const selectCabin = (cabin: Cabin) => {
+      setParcelOpen(false); setClaimOpen(false); setPlaceResults([]); setSearchMessage(""); setLayers(false);
+      setDestination(null); setSelectedPlace(null);
+      setSelectedCabin(cabin); setNavTab("explore");
+      selectedCabinId.current = cabin.id;
+      cabinSource.current.getFeatures().forEach(f => f.set("selected", (f.get("cabin") as Cabin).id === cabin.id));
+      cabinSource.current.changed();
+      const view = instance.getView();
+      view.animate({ center: fromLonLat([cabin.lon, cabin.lat]), zoom: Math.max(view.getZoom() ?? 0, 11), duration: 600 });
+    };
+    selectCabinRef.current = selectCabin;
+    const cabinHit = { layerFilter: (l: BaseLayer) => l === cabinLayer };
+    instance.on("pointermove", e => {
+      if (e.dragging) return;
+      const el = instance.getTargetElement();
+      if (el) el.style.cursor = instance.hasFeatureAtPixel(e.pixel, { ...cabinHit, hitTolerance: 6 }) ? "pointer" : "";
+    });
     instance.on("singleclick", async e => {
+      const hit = instance.forEachFeatureAtPixel(e.pixel, f => f, { ...cabinHit, hitTolerance: 10 });
+      const hitCabin = hit?.get("cabin") as Cabin | undefined;
+      if (hitCabin) { selectCabin(hitCabin); return; }
+      clearCabinSelection();
       const [lon, lat] = toLonLat(e.coordinate);
       await runInspect(lon, lat);
     });
@@ -645,7 +704,7 @@ export default function Home() {
   }
 
   async function search(e: FormEvent) {
-    e.preventDefault(); if (!query.trim() || !map.current) return; setBusy(true); setNavTab("explore"); setSearchMessage("");
+    e.preventDefault(); if (!query.trim() || !map.current) return; setBusy(true); setNavTab("explore"); setSearchMessage(""); clearCabinSelection();
     try {
       const coords = query.match(/^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/);
       if (coords) {
@@ -657,33 +716,41 @@ export default function Home() {
           return;
         }
       }
+      const cabinResults: Place[] = searchCabins(CABINS, query, 5).map(c => ({
+        id: "cabin-" + c.id, name: c.name, address: cabinSubtitle(c), lat: c.lat, lon: c.lon, category: "Forest Service cabin", cabinId: c.id,
+      }));
       const p = new URLSearchParams({ q: query, format: "jsonv2", limit: "5", countrycodes: "us", viewbox: "-116.05,49.0,-104.04,44.36", bounded: "0" });
       try {
         const res = await fetch(`https://nominatim.openstreetmap.org/search?${p}`);
         if (!res.ok) throw new Error("Search failed");
         const data = await res.json() as Array<{ place_id: number | string; name?: string; display_name: string; lat: string; lon: string; type?: string; category?: string }>;
-        const results: Place[] = data.map(r => ({
+        const results: Place[] = [...cabinResults, ...data.map(r => ({
           id: String(r.place_id), name: r.name || r.display_name.split(",")[0], address: r.display_name,
           lat: Number(r.lat), lon: Number(r.lon), category: r.type || r.category || "Place",
-        }));
+        }))];
         setPlaceResults(results); setSelectedPlace(null); setDestination(null);
         setSearchMessage(results.length ? "" : "No match — try a town, creek, or lat, lon");
       } catch {
-        setPlaceResults([]); setSearchMessage("Search unavailable — try again");
+        setPlaceResults(cabinResults); setSearchMessage(cabinResults.length ? "" : "Search unavailable — try again");
       }
-      setParcelOpen(false); setClaimOpen(false);
+      setParcelOpen(false); setClaimOpen(false); clearCabinSelection();
     } finally { setBusy(false); }
   }
 
   function choosePlace(place: Place) {
     setNavTab("explore");
+    if (place.cabinId != null) {
+      const cabin = CABINS.find(c => c.id === place.cabinId);
+      if (cabin) { setPlaceResults([]); selectCabinRef.current?.(cabin); return; }
+    }
+    clearCabinSelection();
     setSelectedPlace(place); setPlaceResults([]); 
     setDestination({ display_name: `${place.name}, ${place.address}`, lon: String(place.lon), lat: String(place.lat) });
     map.current?.getView().animate({ center: fromLonLat([place.lon, place.lat]), zoom: 16, duration: 700 });
   }
 
   function openTab(tab: NavTab) {
-    setNavTab(tab); setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]); setSearchMessage("");
+    setNavTab(tab); setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]); setSearchMessage(""); clearCabinSelection();
   }
 
   function persistSaved(next: SavedLocation[]) {
@@ -902,6 +969,19 @@ export default function Home() {
             </div>
             
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {/* 0. Forest Service cabins */}
+              <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", background: "rgba(255,255,255,0.04)", padding: "6px 8px", borderRadius: "8px" }}>
+                <span style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={CABIN_ICON} alt="" width={22} height={22} style={{ flexShrink: 0 }} />
+                  <span>
+                    <strong style={{ color: "#c4b5fd" }}>Forest Service cabins</strong>
+                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>Tap one for the rental link</small>
+                  </span>
+                </span>
+                <input type="checkbox" checked={active.cabins} onChange={() => toggle("cabins")} style={{ accentColor: "#7c3aed", width: "16px", height: "16px", cursor: "pointer" }} />
+              </label>
+
               {/* 1. Open BLM Land */}
               <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", background: "rgba(255,255,255,0.04)", padding: "6px 8px", borderRadius: "8px" }}>
                 <span style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
@@ -1010,6 +1090,7 @@ export default function Home() {
         {googleMaps && <button className={base === "google" ? "selected sat" : "sat"} onClick={() => setBase("google")}><b>Google</b><span>Satellite</span></button>}
       </div>
       <h3>MAP REFERENCE</h3>
+      <Layer color="#7c3aed" title="Forest Service cabins" sub="Rentable cabins, lookouts & guard stations" on={active.cabins} click={() => toggle("cabins")} />
       <Layer color="#ffffff" title="Cities & towns" sub="Towns, places & county labels" on={active.places} click={() => toggle("places")} />
       <Layer color="#ff9f43" title="Roads & highways" sub="Interstates, highways & road numbers" on={active.roads} click={() => toggle("roads")} />
       <Layer color="#54a0ff" title="Rivers, creeks & lakes" sub="Waterways, ditches & reservoirs" on={active.water} click={() => toggle("water")} />
@@ -1047,6 +1128,25 @@ export default function Home() {
       {clickedLocation && <button className="panel-save" onClick={() => saveLocation(claim.CSE_NAME || "Selected mining claim", "claim", clickedLocation.lon, clickedLocation.lat)}>☆ Save claim</button>}
       {clickedLocation && <button className="panel-route" onClick={() => openDirections(clickedLocation.lat, clickedLocation.lon)}>Directions in Google Maps ➜</button>}
       <p className="record-note">BLM commonly maps claims to the affected PLSS quarter-section. Staked claim boundaries may differ from this display.</p>
+    </aside>}
+
+    {selectedCabin && !parcelOpen && !claimOpen && <aside className="panel parcel claim-card cabin-card">
+      <button className="close" onClick={() => { clearCabinSelection(); }}>×</button>
+      <small>{selectedCabin.kind.toUpperCase()} · FOREST SERVICE</small>
+      <h2>{selectedCabin.name}</h2>
+      <p>{cabinSubtitle(selectedCabin)}</p>
+      {(selectedCabin.status === "closed" || selectedCabin.status === "temporarily closed") && <p style={{ background: "#78350f", color: "#fde68a", padding: "6px 10px", borderRadius: "8px", fontSize: "12px" }}>Listed as {selectedCabin.status} by the Forest Service — check before you go</p>}
+      {selectedCabin.bookUrl ? <>
+        <a href={selectedCabin.bookUrl} target="_blank" rel="noopener noreferrer" style={{ display: "block", textAlign: "center", background: "#7c3aed", color: "#fff", fontWeight: 800, padding: "12px", borderRadius: "10px", textDecoration: "none", margin: "8px 0" }}>Reserve on Recreation.gov ↗</a>
+        <p style={{ fontSize: "11px", color: "#94a3b8" }}>Rates, photos, availability and booking windows are on Recreation.gov.</p>
+      </> : <>
+        <p>No online booking link could be confirmed for this site.</p>
+        {selectedCabin.note && <p>{selectedCabin.note}</p>}
+        <p>Contact the {selectedCabin.forest.replace(/\bNF\b/g, "National Forest")} or call Recreation.gov at <a href={"tel:" + RESERVATION_PHONE.replace(/\D/g, "")} style={{ color: "#c4b5fd" }}>{RESERVATION_PHONE}</a>.</p>
+      </>}
+      <button className="panel-save" onClick={() => saveLocation(selectedCabin.name, "place", selectedCabin.lon, selectedCabin.lat)}>☆ Save</button>
+      <button className="panel-route" onClick={() => openDirections(selectedCabin.lat, selectedCabin.lon)}>Directions ➜</button>
+      <p className="record-note">Data: USDA Forest Service & Recreation.gov, checked {(cabinData as unknown as CabinData).generatedAt}.</p>
     </aside>}
 
     {parcelOpen && <aside className="panel parcel">
@@ -1201,18 +1301,18 @@ export default function Home() {
       <p style={{ margin: "4px 14px", fontSize: "10px", color: "#94a3b8" }}>Search © OpenStreetMap contributors (Nominatim)</p>
       {searchMessage && <p style={{ margin: "8px 14px", fontSize: "12px" }}>{searchMessage}</p>}
       <div className="results-list">{placeResults.map(place => <button key={place.id} onClick={() => choosePlace(place)}>
-        <span><b>{place.name}</b><small>{place.category} · {place.address}</small></span>
+        <span><b>{place.name}{place.cabinId != null && <i style={{ display: "inline-block", fontStyle: "normal", flex: "none", marginLeft: "6px", background: "#7c3aed", color: "#fff", fontSize: "9px", fontWeight: 800, padding: "1px 5px", borderRadius: "4px", verticalAlign: "middle" }}>CABIN</i>}</b><small>{place.category} · {place.address}</small></span>
         <em>›</em>
       </button>)}</div>
     </section>}
 
-    {navTab === "explore" && destination && !parcelOpen && !claimOpen && placeResults.length === 0 && <section className="panel destination">
+    {navTab === "explore" && destination && !selectedCabin && !parcelOpen && !claimOpen && placeResults.length === 0 && <section className="panel destination">
       <div><small>{selectedPlace ? "PLACE" : "DESTINATION"}</small><h2>{selectedPlace?.name || destination.display_name.split(",").slice(0,2).join(",")}</h2>
         {selectedPlace && <p>{selectedPlace.category}</p>}
       </div>
       <div className="destination-buttons"><button className="save-destination" aria-label="Clear destination" onClick={clearMap} title="Close">×</button><button className="save-destination" aria-label="Save destination" onClick={saveCurrentDestination}>☆</button><button onClick={() => openDirections(+destination.lat, +destination.lon)}>Directions in Google Maps ➜</button></div>
     </section>}
-    {navTab === "explore" && !destination && !parcelOpen && !claimOpen && placeResults.length === 0 && !searchMessage && <div className="panel hint"><b>◎</b><span><strong>Tap the map</strong><small>Owners, public land and active mining claims</small></span></div>}
+    {navTab === "explore" && !destination && !selectedCabin && !parcelOpen && !claimOpen && placeResults.length === 0 && !searchMessage && <div className="panel hint"><b>◎</b><span><strong>Tap the map</strong><small>Owners, public land and active mining claims</small></span></div>}
 
     {navTab !== "explore" && <section className="panel nav-sheet">
       <div className="nav-sheet-title"><div><small>OPENLAND</small><h2>{navTab === "routes" ? "Routes" : navTab === "saved" ? "Saved places" : "More"}</h2></div><button onClick={() => openTab("explore")}>×</button></div>
