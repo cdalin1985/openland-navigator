@@ -21,11 +21,13 @@
  * within 3 km. Anything that cannot be verified gets `bookUrl: null` and the app
  * shows the Forest Service's own rental instructions instead of a guessed link.
  *
- * Usage:   node scripts/build-mt-cabins.mjs [--report]
+ * Usage:   node scripts/build-mt-cabins.mjs [--report] [--force]
  *   --report   print the full audit, write nothing
+ *   --force    write even if the result has far fewer cabins/links than the existing file
  * Behind an HTTPS proxy:  NODE_USE_ENV_PROXY=1 node scripts/build-mt-cabins.mjs
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -165,6 +167,8 @@ async function rg(path) {
     try {
       const res = await fetch(`${RG}${path}`, { headers: UA, redirect: "manual", signal: AbortSignal.timeout(30_000) });
       if (res.status === 429 || res.status >= 500) { await new Promise(r => setTimeout(r, 1500 * (attempt + 1))); continue; }
+      // 404 means "not found"; 3xx is read by the retired-link lookup. Anything else (403 block, 4xx) is a hard failure.
+      if (res.status !== 200 && res.status !== 404 && !(res.status >= 300 && res.status < 400)) throw new Error(`recreation.gov ${RG}${path} returned HTTP ${res.status}`);
       return res;
     } catch (err) {
       if (attempt === 2) throw err;
@@ -314,6 +318,27 @@ export const cleanName = s => s
   .replace(/\s+/g, " ")
   .trim();
 
+/** Problems (empty = OK) when `next` is much smaller than `previous`, e.g. after a blocked or partial fetch. */
+export function checkAgainstPrevious(previous, next) {
+  const problems = [];
+  if (previous.length >= 20 && next.length < 0.9 * previous.length) {
+    problems.push(`cabin count dropped from ${previous.length} to ${next.length}`);
+  }
+  const linked = list => list.filter(c => c.bookUrl).length;
+  const before = linked(previous), after = linked(next);
+  if (before >= 20 && after < 0.9 * before) problems.push(`linked cabins dropped from ${before} to ${after}`);
+  return problems;
+}
+
+function readPreviousCabins() {
+  try {
+    const cabins = JSON.parse(readFileSync(OUT_FILE, "utf8")).cabins;
+    return Array.isArray(cabins) ? cabins : [];
+  } catch {
+    return [];
+  }
+}
+
 async function main() {
   const [rings, records, recGov] = await Promise.all([fetchMontanaRings(), fetchCabinRecords(), fetchRecGovCabins()]);
   const log = [];
@@ -398,7 +423,16 @@ async function main() {
   const unresolved = cabins.filter(c => !c.bookUrl);
   if (unresolved.length) console.log(`Unresolved (${unresolved.length}):\n  ${unresolved.map(c => `${c.name} [${c.forest}] — ${c.note || "(no text)"}`).join("\n  ")}`);
 
-  if (REPORT_ONLY) return;
+  const problems = checkAgainstPrevious(readPreviousCabins(), cabins);
+  if (REPORT_ONLY) {
+    if (problems.length) { console.log(`WARNING: ${problems.join("; ")} compared with the existing data file`); process.exitCode = 1; }
+    return;
+  }
+  if (problems.length && !process.argv.includes("--force")) {
+    problems.forEach(p => console.error(p));
+    console.error("Refusing to overwrite app/data/mt-cabins.json (pass --force to override).");
+    process.exit(1);
+  }
   const payload = {
     generatedAt: new Date().toISOString().slice(0, 10),
     sources: [
@@ -410,7 +444,8 @@ async function main() {
     cabins,
   };
   await mkdir(dirname(OUT_FILE), { recursive: true });
-  await writeFile(OUT_FILE, `${JSON.stringify(payload, null, 1)}\n`);
+  writeFileSync(`${OUT_FILE}.tmp`, `${JSON.stringify(payload, null, 1)}\n`);
+  renameSync(`${OUT_FILE}.tmp`, OUT_FILE);
   console.log(`Wrote ${cabins.length} cabins to ${OUT_FILE}`);
 }
 

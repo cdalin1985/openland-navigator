@@ -113,7 +113,7 @@ cd /path/to/openland-navigator
 npm run data:cabins
 ```
 
-Add `-- --report` to audit without writing the file. Cabins whose link cannot be verified get no booking button; the app shows the Forest Service rental instructions instead of a guessed link.
+Add `-- --report` to audit without writing the file. Cabins whose link cannot be verified get no booking button; the app shows the Forest Service rental instructions instead of a guessed link. The script refuses to overwrite the data file if the new result has far fewer cabins or links than the existing one (for example when Recreation.gov is unreachable); `--force` overrides.
 
 ## Learn More
 

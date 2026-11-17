@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { checkAgainstPrevious } from "../scripts/build-mt-cabins.mjs";
 import { cabinSubtitle, RESERVATION_PHONE, searchCabins } from "../app/lib/cabins.ts";
 
 const data = JSON.parse(readFileSync(new URL("../app/data/mt-cabins.json", import.meta.url), "utf8"));
@@ -100,4 +101,12 @@ test("real data: well-known cabins can be found by name", () => {
 test("subtitle and phone helpers", () => {
   assert.equal(cabinSubtitle(sample[2]), "Lookout · Custer Gallatin NF");
   assert.equal(RESERVATION_PHONE, "1-877-444-6777");
+});
+
+test("checkAgainstPrevious guards against shrinking data", () => {
+  const make = (n, linked) => Array.from({ length: n }, (_, i) => ({ id: i, bookUrl: i < linked ? `https://x/${i}` : null }));
+  assert.deepEqual(checkAgainstPrevious(make(110, 100), make(110, 100)), []);
+  assert.equal(checkAgainstPrevious(make(110, 100), make(55, 50)).length > 0, true, "half the cabins");
+  assert.equal(checkAgainstPrevious(make(110, 100), make(110, 10)).length > 0, true, "links 100 -> 10");
+  assert.deepEqual(checkAgainstPrevious(make(19, 19), make(1, 0)), []);
 });

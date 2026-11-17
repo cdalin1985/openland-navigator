@@ -342,6 +342,13 @@ export default function Home() {
       .catch(() => setStakeCopied(false));
   }
 
+  function clearCabinSelection() {
+    setSelectedCabin(null);
+    selectedCabinId.current = null;
+    cabinSource.current.getFeatures().forEach(f => f.set("selected", false));
+    cabinSource.current.changed();
+  }
+
   useEffect(() => {
     if (!target.current) return;
     const usgsImagery = new TileLayer({
@@ -493,7 +500,7 @@ export default function Home() {
       vectors.current.addFeature(tapPin);
 
       setParcel(null); setClaim(null); setActiveClaimsList([]); setLapsedClaimsList([]); setLandCheck(null);
-      setSelectedCabin(null);
+      clearCabinSelection();
       setClaimOpen(false); setParcelOpen(true); setSelectedPlace(null); setPlaceResults([]);
       setParcelMessage("Checking BLM claims and land ownership…");
       setMinerals(null); setMineralsError(""); setMineralsLoading(true);
@@ -518,7 +525,7 @@ export default function Home() {
     const selectCabin = (cabin: Cabin) => {
       setParcelOpen(false); setClaimOpen(false); setPlaceResults([]); setSearchMessage(""); setLayers(false);
       setDestination(null); setSelectedPlace(null);
-      setSelectedCabin(cabin);
+      setSelectedCabin(cabin); setNavTab("explore");
       selectedCabinId.current = cabin.id;
       cabinSource.current.getFeatures().forEach(f => f.set("selected", (f.get("cabin") as Cabin).id === cabin.id));
       cabinSource.current.changed();
@@ -536,10 +543,7 @@ export default function Home() {
       const hit = instance.forEachFeatureAtPixel(e.pixel, f => f, { ...cabinHit, hitTolerance: 10 });
       const hitCabin = hit?.get("cabin") as Cabin | undefined;
       if (hitCabin) { selectCabin(hitCabin); return; }
-      setSelectedCabin(null);
-      selectedCabinId.current = null;
-      cabinSource.current.getFeatures().forEach(f => f.set("selected", false));
-      cabinSource.current.changed();
+      clearCabinSelection();
       const [lon, lat] = toLonLat(e.coordinate);
       await runInspect(lon, lat);
     });
@@ -700,7 +704,7 @@ export default function Home() {
   }
 
   async function search(e: FormEvent) {
-    e.preventDefault(); if (!query.trim() || !map.current) return; setBusy(true); setNavTab("explore"); setSearchMessage(""); setSelectedCabin(null);
+    e.preventDefault(); if (!query.trim() || !map.current) return; setBusy(true); setNavTab("explore"); setSearchMessage(""); clearCabinSelection();
     try {
       const coords = query.match(/^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/);
       if (coords) {
@@ -729,7 +733,7 @@ export default function Home() {
       } catch {
         setPlaceResults(cabinResults); setSearchMessage(cabinResults.length ? "" : "Search unavailable — try again");
       }
-      setParcelOpen(false); setClaimOpen(false); setSelectedCabin(null);
+      setParcelOpen(false); setClaimOpen(false); clearCabinSelection();
     } finally { setBusy(false); }
   }
 
@@ -739,14 +743,14 @@ export default function Home() {
       const cabin = CABINS.find(c => c.id === place.cabinId);
       if (cabin) { setPlaceResults([]); selectCabinRef.current?.(cabin); return; }
     }
-    setSelectedCabin(null);
+    clearCabinSelection();
     setSelectedPlace(place); setPlaceResults([]); 
     setDestination({ display_name: `${place.name}, ${place.address}`, lon: String(place.lon), lat: String(place.lat) });
     map.current?.getView().animate({ center: fromLonLat([place.lon, place.lat]), zoom: 16, duration: 700 });
   }
 
   function openTab(tab: NavTab) {
-    setNavTab(tab); setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]); setSearchMessage(""); setSelectedCabin(null);
+    setNavTab(tab); setLayers(false); setParcelOpen(false); setClaimOpen(false); setPlaceResults([]); setSearchMessage(""); clearCabinSelection();
   }
 
   function persistSaved(next: SavedLocation[]) {
@@ -1127,14 +1131,14 @@ export default function Home() {
     </aside>}
 
     {selectedCabin && !parcelOpen && !claimOpen && <aside className="panel parcel claim-card cabin-card">
-      <button className="close" onClick={() => { setSelectedCabin(null); selectedCabinId.current = null; cabinSource.current.getFeatures().forEach(f => f.set("selected", false)); cabinSource.current.changed(); }}>×</button>
+      <button className="close" onClick={() => { clearCabinSelection(); }}>×</button>
       <small>{selectedCabin.kind.toUpperCase()} · FOREST SERVICE</small>
       <h2>{selectedCabin.name}</h2>
       <p>{cabinSubtitle(selectedCabin)}</p>
-      {selectedCabin.status === "closed" && <p style={{ background: "#78350f", color: "#fde68a", padding: "6px 10px", borderRadius: "8px", fontSize: "12px" }}>Listed as closed by the Forest Service — check before you go</p>}
+      {(selectedCabin.status === "closed" || selectedCabin.status === "temporarily closed") && <p style={{ background: "#78350f", color: "#fde68a", padding: "6px 10px", borderRadius: "8px", fontSize: "12px" }}>Listed as {selectedCabin.status} by the Forest Service — check before you go</p>}
       {selectedCabin.bookUrl ? <>
         <a href={selectedCabin.bookUrl} target="_blank" rel="noopener noreferrer" style={{ display: "block", textAlign: "center", background: "#7c3aed", color: "#fff", fontWeight: 800, padding: "12px", borderRadius: "10px", textDecoration: "none", margin: "8px 0" }}>Reserve on Recreation.gov ↗</a>
-        <p style={{ fontSize: "11px", color: "#94a3b8" }}>Rates, photos and availability are on Recreation.gov. Reservations open up to 6 months ahead.</p>
+        <p style={{ fontSize: "11px", color: "#94a3b8" }}>Rates, photos, availability and booking windows are on Recreation.gov.</p>
       </> : <>
         <p>No online booking link could be confirmed for this site.</p>
         {selectedCabin.note && <p>{selectedCabin.note}</p>}
@@ -1297,7 +1301,7 @@ export default function Home() {
       <p style={{ margin: "4px 14px", fontSize: "10px", color: "#94a3b8" }}>Search © OpenStreetMap contributors (Nominatim)</p>
       {searchMessage && <p style={{ margin: "8px 14px", fontSize: "12px" }}>{searchMessage}</p>}
       <div className="results-list">{placeResults.map(place => <button key={place.id} onClick={() => choosePlace(place)}>
-        <span><b>{place.name}{place.cabinId != null && <span style={{ marginLeft: "6px", background: "#7c3aed", color: "#fff", fontSize: "9px", fontWeight: 800, padding: "1px 5px", borderRadius: "4px", verticalAlign: "middle" }}>CABIN</span>}</b><small>{place.category} · {place.address}</small></span>
+        <span><b>{place.name}{place.cabinId != null && <i style={{ display: "inline-block", fontStyle: "normal", flex: "none", marginLeft: "6px", background: "#7c3aed", color: "#fff", fontSize: "9px", fontWeight: 800, padding: "1px 5px", borderRadius: "4px", verticalAlign: "middle" }}>CABIN</i>}</b><small>{place.category} · {place.address}</small></span>
         <em>›</em>
       </button>)}</div>
     </section>}
