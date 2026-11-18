@@ -150,6 +150,7 @@ test("zoomed out, only closed claims load (whole box, clipped to Montana) and th
   const q = new URL(urls[0]).searchParams;
   assert.equal(q.get("geometry"), MONTANA_BBOX.map(v => v.toFixed(5)).join(","));
   assert.equal(q.get("maxAllowableOffset"), "0.000500", "small claims are never simplified away");
+  assert.equal(q.get("where"), "CSE_NR LIKE 'MT%'", "zoomed out, only Montana case numbers");
   assert.equal(r.zoomedOut, true);
   assert.equal(r.coverChecked, false);
   assert.deepEqual(r.failed, []);

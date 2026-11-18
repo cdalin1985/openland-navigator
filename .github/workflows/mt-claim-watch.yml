@@ -1,0 +1,51 @@
+# Nightly Montana claim watch: snapshot BLM's Montana mining claims, compare with the
+# previous night, and publish the change list the app reads ("Recently closed in Montana").
+# Results live on the `data` branch, replaced each night by a single commit (no history build-up).
+name: Montana claim watch
+
+on:
+  schedule:
+    - cron: "23 9 * * *" # 09:23 UTC, about 2:23 AM in Montana
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mt-claim-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Load last night's data
+        run: |
+          mkdir -p claim-data
+          if git fetch --depth 1 origin data 2>/dev/null; then
+            git archive FETCH_HEAD | tar -x -C claim-data
+          else
+            echo "No data branch yet: this run records the baseline."
+          fi
+
+      - name: Compare tonight's BLM claims with last night's
+        run: node scripts/mt-claim-watch.mjs --dir claim-data
+
+      - name: Publish to the data branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd claim-data
+          git init -q -b data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mt-claims-snapshot.json mt-claim-changes.json
+          git commit -q -m "Montana claim watch $(date -u +%F)"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:data

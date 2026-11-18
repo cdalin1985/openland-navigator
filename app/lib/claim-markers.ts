@@ -37,6 +37,8 @@ export type ClaimMarker = {
   lat: number;
   /** Closed claims only: true = an active claim is mapped on its centre, false = none is, null = not checked. */
   covered: boolean | null;
+  /** Closed claims only: the nightly watch saw it close in the last 30 days (set by the map). */
+  recent?: boolean;
 };
 export type ClaimMarkerResult = {
   active: ClaimMarker[];
@@ -145,13 +147,20 @@ export function clipToMontana(b: BBox): BBox | null {
   return out[0] < out[2] && out[1] < out[3] ? out : null;
 }
 
+/**
+ * Zoomed out, only Montana case numbers load: BLM's Montana office numbers its claims "MT…",
+ * so this drops the Idaho and Wyoming claims that sit inside Montana's bounding box
+ * (about 1,700 of the 2,400 closed claims there). Zoomed in, every claim in view loads.
+ */
+export const MONTANA_CASES = "CSE_NR LIKE 'MT%'";
+
 /** Fetch one claim layer for a box, paging up to MAX_PAGES. */
-async function fetchLayer(url: string, bbox: BBox, zoom: number, signal?: AbortSignal): Promise<{ features: ArcgisFeature[]; truncated: boolean }> {
+async function fetchLayer(url: string, bbox: BBox, zoom: number, signal?: AbortSignal, where = "1=1"): Promise<{ features: ArcgisFeature[]; truncated: boolean }> {
   const features: ArcgisFeature[] = [];
   for (let page = 0; page < MAX_PAGES; page++) {
     const qp = new URLSearchParams({
       f: "json",
-      where: "1=1",
+      where,
       geometry: bbox.map(v => v.toFixed(5)).join(","),
       geometryType: "esriGeometryEnvelope",
       inSR: "4326",
@@ -190,7 +199,7 @@ export async function loadClaimMarkers(
   if (!box || (!want.closed && !(want.active && zoomedIn))) return result;
   const [active, closed] = await Promise.allSettled([
     zoomedIn ? fetchLayer(CLAIMS_URL, box, zoom, signal) : Promise.reject(new Error("zoomed out")),
-    want.closed ? fetchLayer(CLAIMS_CLOSED_URL, box, zoom, signal) : Promise.resolve({ features: [], truncated: false }),
+    want.closed ? fetchLayer(CLAIMS_CLOSED_URL, box, zoom, signal, zoomedIn ? "1=1" : MONTANA_CASES) : Promise.resolve({ features: [], truncated: false }),
   ]);
   if (active.status === "fulfilled") {
     if (want.active) {
