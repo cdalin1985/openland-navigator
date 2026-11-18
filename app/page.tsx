@@ -28,11 +28,13 @@ import {
 } from "./lib/land-status";
 import { checkLandSmart, loadAllAreas, offlineFlowlines, type BBox } from "./lib/offline";
 import OfflineAreas from "./components/OfflineAreas";
+import RecentClosures from "./components/RecentClosures";
+import { loadClaimChanges, recentClosureIds } from "./lib/claim-changes";
 import Polygon from "ol/geom/Polygon";
 import cabinData from "./data/mt-cabins.json";
 import { CABIN_KINDS, KIND_LABEL, RESERVATION_PHONE, cabinSubtitle, searchCabins, type Cabin, type CabinData } from "./lib/cabins";
 import { MARKER_MIN_ZOOM, MONTANA_BBOX, clipToMontana, loadClaimMarkers, markerNote, type ClaimMarker } from "./lib/claim-markers";
-import { CLAIM_ICON, RENTAL_ICON } from "./lib/map-icons";
+import { CLAIM_ICON, RECENT_KEY_ICON, RENTAL_ICON } from "./lib/map-icons";
 import { claimClusterStyle, rentalStyle } from "./lib/map-styles";
 
 const CABINS = (cabinData as unknown as CabinData).cabins;
@@ -111,6 +113,8 @@ export default function Home() {
   /** Which claim icon layers are switched on (read by the map's move handler). */
   const claimIconsWanted = useRef({ claims: true, closedClaims: true });
   const refreshClaimIcons = useRef<(() => void) | null>(null);
+  /** Claims the nightly watch saw close in the last 30 days (yellow ring on the map). */
+  const recentClosedIds = useRef<Set<string>>(new Set());
   const selectCabinRef = useRef<((cabin: Cabin) => void) | null>(null);
   const selectedCabinId = useRef<number | null>(null);
   const labelLayers = useRef<Array<ImageLayer<ImageArcGISRest> | TileLayer<XYZ>>>([]);
@@ -128,6 +132,7 @@ export default function Home() {
   const [parcelOpen, setParcelOpen] = useState(false);
   const [selectedCabin, setSelectedCabin] = useState<Cabin | null>(null);
   const [claimIconNote, setClaimIconNote] = useState("");
+  const [recentOpen, setRecentOpen] = useState(false);
   const [parcelMessage, setParcelMessage] = useState("");
   const [claim, setClaim] = useState<MiningClaim | null>(null);
   const [activeClaimsList, setActiveClaimsList] = useState<MiningClaim[]>([]);
@@ -614,7 +619,11 @@ export default function Home() {
         if (controller.signal.aborted) return;
         if (r.coverChecked) r.closed.forEach(m => knownCover.set(m.id, m.covered === true));
         const closed = r.closed.map(m => (m.covered === null && knownCover.has(m.id) ? { ...m, covered: knownCover.get(m.id) ?? null } : m));
-        const toFeature = (m: ClaimMarker) => { const f = new Feature(new Point(fromLonLat([m.lon, m.lat]))); f.set("marker", m); return f; };
+        const toFeature = (m: ClaimMarker) => {
+          const f = new Feature(new Point(fromLonLat([m.lon, m.lat])));
+          f.set("marker", m.status === "closed" ? { ...m, recent: recentClosedIds.current.has(m.id) } : m);
+          return f;
+        };
         // Replace a layer's icons only when its lookup worked, so a failed load never wipes icons to "none".
         if (!r.failed.includes("active")) { activeClaimSource.current.clear(); activeClaimSource.current.addFeatures(r.active.map(toFeature)); }
         if (!r.failed.includes("closed")) { closedClaimSource.current.clear(); closedClaimSource.current.addFeatures(closed.map(toFeature)); }
@@ -625,6 +634,15 @@ export default function Home() {
     };
     instance.on("moveend", loadIcons);
     refreshClaimIcons.current = loadIcons;
+    // Ring claims the nightly watch saw close recently. Only a highlight: if the list can't load, icons show as usual.
+    void loadClaimChanges().then(changes => {
+      recentClosedIds.current = recentClosureIds(changes);
+      closedClaimSource.current.getFeatures().forEach(f => {
+        const m = f.get("marker") as ClaimMarker;
+        f.set("marker", { ...m, recent: recentClosedIds.current.has(m.id) });
+      });
+      closedClaimSource.current.changed();
+    }).catch(() => undefined);
     void (async () => {
       try {
         const config = await (await fetch("/api/google/config")).json() as { enabled?: boolean; key?: string };
@@ -896,6 +914,15 @@ export default function Home() {
       }
     `}</style>
 
+    {recentOpen && <RecentClosures
+      onClose={() => setRecentOpen(false)}
+      onGoTo={(lon, lat) => {
+        setRecentOpen(false);
+        map.current?.getView().animate({ center: fromLonLat([lon, lat]), zoom: 14, duration: 700 });
+        void inspectRef.current?.(lon, lat);
+      }}
+    />}
+
     {scanOpen && (
       <div style={{
         position: "absolute", top: "112px", left: "14px", zIndex: 28, width: "330px", maxHeight: "65vh",
@@ -948,8 +975,25 @@ export default function Home() {
       paddingBottom: "4px",
       scrollbarWidth: "none"
     }}>
-            <button
-        onClick={scanAreaForLapsedClaims}
+      <button
+        onClick={() => { setRecentOpen(true); setScanOpen(false); }}
+        style={{
+          background: "linear-gradient(135deg, #0e7490, #155e75)",
+          color: "#ffffff",
+          border: "1px solid #67e8f9",
+          borderRadius: "999px",
+          padding: "6px 14px",
+          fontSize: "11px",
+          fontWeight: 800,
+          whiteSpace: "nowrap",
+          cursor: "pointer",
+          boxShadow: "0 4px 14px rgba(6, 182, 212, 0.35)"
+        }}
+      >
+        🆕 Recently closed in Montana
+      </button>
+      <button
+        onClick={() => { setRecentOpen(false); void scanAreaForLapsedClaims(); }}
         style={{
           background: "linear-gradient(135deg, #06b6d4, #0284c7)",
           color: "#ffffff",
@@ -1101,7 +1145,7 @@ export default function Home() {
                 <input type="checkbox" checked={active.closedClaims} onChange={() => toggle("closedClaims")} style={{ accentColor: "#06b6d4", width: "16px", height: "16px", cursor: "pointer" }} />
               </label>
               <div style={{ padding: "0 8px" }}>
-                <KeyIcons items={[[CLAIM_ICON.closed.placer, "Closed, no active claim on it"], [CLAIM_ICON.covered.placer, "Closed, active claim on it now"], [CLAIM_ICON.unchecked.placer, "Closed, not checked yet (zoom in)"]]} />
+                <KeyIcons items={[[CLAIM_ICON.closed.placer, "Closed, no active claim on it"], [CLAIM_ICON.covered.placer, "Closed, active claim on it now"], [CLAIM_ICON.unchecked.placer, "Closed, not checked yet (zoom in)"], [RECENT_KEY_ICON, "Yellow ring: closed in the last 30 days"]]} />
                 <div style={{ height: "6px" }} />
                 <KeyIcons items={[[CLAIM_ICON.active.placer, "Placer claim"], [CLAIM_ICON.active.lode, "Lode claim"], [CLAIM_ICON.active.millsite, "Mill site"], [CLAIM_ICON.active.tunnel, "Tunnel site"]]} />
                 <small style={{ display: "block", color: "#94a3b8", fontSize: "9.5px", marginTop: "4px" }}>Active-claim icons show from zoom 11 in. A number = several claims; BLM often maps claims to the same survey square.</small>

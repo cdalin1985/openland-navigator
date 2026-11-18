@@ -85,3 +85,9 @@ export const CLAIM_ICON = {
   unchecked: mapValues(CLAIM_TYPES, t => svgUri(squareBase(UNCHECKED_CLAIM_FILL, UNCHECKED_CLAIM_COLOR) + CLAIM_GLYPH[t](UNCHECKED_CLAIM_FILL, UNCHECKED_CLAIM_COLOR))),
 };
 export type ClaimLook = keyof typeof CLAIM_ICON;
+
+/** Map-key sample for "closed in the last 30 days": a closed-claim square inside the yellow ring the map draws. */
+export const RECENT_KEY_ICON = svgUri(
+  `<circle cx='18' cy='18' r='15.5' fill='rgba(250,204,21,0.3)' stroke='#facc15' stroke-width='3'/>` +
+  `<rect x='10' y='10' width='16' height='16' rx='4' fill='${CLOSED_CLAIM_COLOR}' stroke='${W}' stroke-width='2'/>`,
+);

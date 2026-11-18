@@ -40,3 +40,6 @@ next-env.d.ts
 /.sites-runtime/
 /outputs/
 /work/
+
+# Local runs of scripts/mt-claim-watch.mjs
+claim-data/

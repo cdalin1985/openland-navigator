@@ -121,10 +121,26 @@ Add `-- --report` to audit without writing the file. Cabins whose link cannot be
 
 The map puts an icon on BLM mining claims (`app/lib/claim-markers.ts`), read live from the same BLM MLRS layers that draw the pink (active) and cyan (closed) claim areas. Queries are clipped to Montana.
 
-- **Closed claims show at every zoom.** Zoomed out, the whole state's closed claims (about 2,400 in BLM's map) load once and cluster into counts. They show as cyan outlines because they haven't been checked yet. From zoom 11 in, each closed claim in view is compared with the active claims there: solid cyan means no active claim is mapped on that spot, grey means one is. Answers found while zoomed in are kept when you zoom back out.
-- **Active claims show from zoom 11 in** as round pink icons (there are tens of thousands statewide).
+- **Closed claims show at every zoom.** Zoomed out, every closed claim with a Montana case number (about 730 in BLM's map) loads once and clusters into counts. They show as cyan outlines because they haven't been checked yet. From zoom 11 in, each closed claim in view is compared with the active claims there: solid cyan means no active claim is mapped on that spot, grey means one is. Answers found while zoomed in are kept when you zoom back out.
+- **Active claims show from zoom 11 in** as round pink icons (about 18,000 inside Montana).
+- **Yellow ring:** a closed claim the nightly watch (below) saw close in the last 30 days.
 - The picture shows the claim type: gold pan (placer), pickaxe (lode), gear (mill site), tunnel (tunnel site). BLM usually maps a claim to its survey square, so several claims often share one spot and show as a number.
 - Tapping an icon runs the normal land check at that claim. If BLM can't be reached, a note says so; icons are never silently dropped.
+
+## Nightly Montana Claim Watch
+
+`.github/workflows/mt-claim-watch.yml` runs `scripts/mt-claim-watch.mjs` every night at 09:23 UTC (free on GitHub's standard runners for public repos). It reads every BLM claim inside Montana's outline (open and closed), compares it with the previous night, and records what changed: claims that closed, new filings, claims BLM dropped from its open map, and closures BLM reversed. Results go to the `data` branch as `mt-claim-changes.json` (last 120 days) plus the full snapshot; each night replaces that branch with one commit, so it never builds up history.
+
+The app reads the list from `https://raw.githubusercontent.com/cdalin1985/openland-navigator/data/mt-claim-changes.json` for the **Recently closed in Montana** panel and the yellow rings. A failed or incomplete BLM read stops the run without writing; a night where open claims drop by more than 25% is refused as a bad read (`--force` overrides). The first run only records a baseline.
+
+Run it locally (writes to `claim-data/`, which git ignores):
+
+```bash
+cd /path/to/openland-navigator
+npm run data:claim-watch
+```
+
+Start it by hand: Actions tab, **Montana claim watch**, **Run workflow**. GitHub turns scheduled workflows off after 60 days without repository activity; if the panel says the check has stopped, re-enable it on the same page.
 
 ## Learn More
 

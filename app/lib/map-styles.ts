@@ -37,14 +37,20 @@ export function claimLook(m: ClaimMarker): ClaimLook {
  * Closed-claim badges are cyan if any of them has no active claim on it, a cyan
  * outline if some weren't checked, and grey only when every one has an active claim on it.
  */
+/** Yellow ring drawn behind a claim icon or count that includes a claim closed in the last 30 days. */
+const recentRing = (radius: number) => cached(`ring:${radius}`, () =>
+  new Style({ image: new Circle({ radius, fill: new Fill({ color: "rgba(250,204,21,0.3)" }), stroke: new Stroke({ color: "#facc15", width: 3 }) }), zIndex: 0 })) as Style;
+
 export function claimClusterStyle(status: ClaimStatus) {
-  return (cluster: FeatureLike): Style => {
+  return (cluster: FeatureLike): Style | Style[] => {
     const members = (cluster.get("features") as Feature[] | undefined) ?? [];
     const markers = members.map(f => f.get("marker") as ClaimMarker);
+    const recent = markers.some(m => m.recent);
     if (markers.length === 1) {
       const m = markers[0];
       const look = claimLook(m);
-      return cached(`claim:${look}:${m.type}`, () => new Style({ image: new Icon({ src: CLAIM_ICON[look][m.type], scale: 0.72 }), zIndex: 1 })) as Style;
+      const icon = cached(`claim:${look}:${m.type}`, () => new Style({ image: new Icon({ src: CLAIM_ICON[look][m.type], scale: 0.72 }), zIndex: 1 })) as Style;
+      return recent ? [recentRing(19), icon] : icon;
     }
     const look = status === "active" ? "active"
       : markers.some(m => m.covered === false) ? "closed"
@@ -57,8 +63,8 @@ export function claimClusterStyle(status: ClaimStatus) {
     }[look];
     const count = markers.length;
     const label = count > 999 ? "999+" : String(count);
-    return cached(`cluster:${look}:${label}`, () => {
-      const radius = Math.min(19, 11 + Math.log2(count) * 1.6);
+    const radius = Math.min(19, 11 + Math.log2(count) * 1.6);
+    const badge = cached(`cluster:${look}:${label}`, () => {
       const fill = new Fill({ color }), stroke = new Stroke({ color: edge, width: 2.5 });
       return new Style({
         // Squares for closed claims, circles for active, matching the single icons.
@@ -69,5 +75,7 @@ export function claimClusterStyle(status: ClaimStatus) {
         zIndex: 2,
       });
     }) as Style;
+    // Square badges reach radius × 1.25 at the corners; the ring sits just outside either shape.
+    return recent ? [recentRing(Math.round((status === "active" ? radius : radius * 1.25) + 6)), badge] : badge;
   };
 }

@@ -51,7 +51,7 @@ async function getJson(base, params, headers = {}) {
 }
 
 /** Montana outline as a list of rings of [lon, lat]. */
-async function fetchMontanaRings() {
+export async function fetchMontanaRings() {
   const json = await getJson(STATES_LAYER, {
     where: "STUSAB='MT'", returnGeometry: "true", outSR: "4326", geometryPrecision: "5", outFields: "NAME",
   });
@@ -61,7 +61,7 @@ async function fetchMontanaRings() {
 }
 
 /** Even-odd point-in-polygon across every ring (holes and multipart handled). */
-function insideRings(lon, lat, rings) {
+export function insideRings(lon, lat, rings) {
   let inside = false;
   for (const ring of rings) {
     for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
