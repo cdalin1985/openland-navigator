@@ -5,7 +5,9 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import {
+  MONTANA_BBOX,
   claimTypeOf,
+  clipToMontana,
   degreesPerPixel,
   loadClaimMarkers,
   markCovered,
@@ -104,7 +106,7 @@ test("a failed active lookup is reported and leaves closed claims unchecked, nev
   assert.equal(r.coverChecked, false);
   assert.ok(r.closed.every(m => m.covered === null));
   assert.match(markerNote(r), /Couldn't load active claim icons/);
-  assert.match(markerNote(r), /grey/);
+  assert.match(markerNote(r), /outlines \(not checked\)/);
 });
 
 test("with active icons switched off, active claims are still fetched for the check but not returned", async () => {
@@ -137,4 +139,37 @@ test("nothing is fetched when both claim layers are switched off", async () => {
   const r = await loadClaimMarkers(box, 12, { active: false, closed: false });
   assert.equal(calls, 0);
   assert.deepEqual(r.active, []);
+});
+
+test("zoomed out, only closed claims load (whole box, clipped to Montana) and they're marked not checked", async () => {
+  const urls = [];
+  globalThis.fetch = async url => { urls.push(String(url)); return json({ features: [closedUnder, closedOpen] }); };
+  const r = await loadClaimMarkers([-125, 40, -100, 52], 6, { active: true, closed: true });
+  assert.equal(urls.length, 1, "no active-claim lookup when zoomed out");
+  assert.ok(urls[0].includes("Mining_Claims_Closed"));
+  const q = new URL(urls[0]).searchParams;
+  assert.equal(q.get("geometry"), MONTANA_BBOX.map(v => v.toFixed(5)).join(","));
+  assert.equal(q.get("maxAllowableOffset"), "0.000500", "small claims are never simplified away");
+  assert.equal(r.zoomedOut, true);
+  assert.equal(r.coverChecked, false);
+  assert.deepEqual(r.failed, []);
+  assert.ok(r.closed.every(m => m.covered === null));
+  assert.equal(markerNote(r), "", "not checking while zoomed out is expected, not an error");
+});
+
+test("zoomed out with closed claims switched off, nothing loads", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return json({ features: [] }); };
+  await loadClaimMarkers(box, 8, { active: true, closed: false });
+  assert.equal(calls, 0);
+});
+
+test("boxes are clipped to Montana; a box outside it loads nothing", async () => {
+  assert.deepEqual(clipToMontana([-120, 45, -110, 50]), [-116.05, 45, -110, 49]);
+  assert.equal(clipToMontana([-100, 30, -90, 35]), null);
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return json({ features: [] }); };
+  const r = await loadClaimMarkers([-100, 30, -90, 35], 12, { active: true, closed: true });
+  assert.equal(calls, 0);
+  assert.deepEqual(r.failed, []);
 });

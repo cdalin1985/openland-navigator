@@ -119,7 +119,12 @@ Add `-- --report` to audit without writing the file. Cabins whose link cannot be
 
 ## Mining Claim Icons
 
-From zoom 11 in, the map puts an icon on every BLM claim in view (`app/lib/claim-markers.ts`), read live from the same BLM MLRS layers that draw the pink (active) and cyan (closed) claim areas. Round pink icons are active claims; square icons are closed claims, cyan when no active claim is mapped on that spot and grey when one is (or when that couldn't be checked). The picture shows the claim type: gold pan (placer), pickaxe (lode), gear (mill site), tunnel (tunnel site). BLM usually maps a claim to its survey square, so several claims often share one spot and show as a number. Tapping an icon runs the normal land check at that claim. If BLM can't be reached, a note says so; icons are never silently dropped.
+The map puts an icon on BLM mining claims (`app/lib/claim-markers.ts`), read live from the same BLM MLRS layers that draw the pink (active) and cyan (closed) claim areas. Queries are clipped to Montana.
+
+- **Closed claims show at every zoom.** Zoomed out, the whole state's closed claims (about 2,400 in BLM's map) load once and cluster into counts. They show as cyan outlines because they haven't been checked yet. From zoom 11 in, each closed claim in view is compared with the active claims there: solid cyan means no active claim is mapped on that spot, grey means one is. Answers found while zoomed in are kept when you zoom back out.
+- **Active claims show from zoom 11 in** as round pink icons (there are tens of thousands statewide).
+- The picture shows the claim type: gold pan (placer), pickaxe (lode), gear (mill site), tunnel (tunnel site). BLM usually maps a claim to its survey square, so several claims often share one spot and show as a number.
+- Tapping an icon runs the normal land check at that claim. If BLM can't be reached, a note says so; icons are never silently dropped.
 
 ## Learn More
 

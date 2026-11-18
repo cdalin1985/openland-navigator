@@ -31,7 +31,7 @@ import OfflineAreas from "./components/OfflineAreas";
 import Polygon from "ol/geom/Polygon";
 import cabinData from "./data/mt-cabins.json";
 import { CABIN_KINDS, KIND_LABEL, RESERVATION_PHONE, cabinSubtitle, searchCabins, type Cabin, type CabinData } from "./lib/cabins";
-import { MARKER_MIN_ZOOM, loadClaimMarkers, markerNote, type ClaimMarker } from "./lib/claim-markers";
+import { MARKER_MIN_ZOOM, MONTANA_BBOX, clipToMontana, loadClaimMarkers, markerNote, type ClaimMarker } from "./lib/claim-markers";
 import { CLAIM_ICON, RENTAL_ICON } from "./lib/map-icons";
 import { claimClusterStyle, rentalStyle } from "./lib/map-styles";
 
@@ -449,13 +449,14 @@ export default function Home() {
       style: f => rentalStyle((f.get("cabin") as Cabin).kind, f.get("selected") ? "selected" : (map.current?.getView().getZoom() ?? 11) < 8 ? "small" : "normal"),
     });
     // Claim icons sit under the rental icons; closed claims above active ones because they're rarer.
+    // Closed claims show at every zoom (a few thousand statewide); active ones from zoom 11 in.
     const activeClaimIcons = new VectorLayer({
       source: new Cluster({ distance: 34, source: activeClaimSource.current }),
       style: claimClusterStyle("active"), minZoom: MARKER_MIN_ZOOM, zIndex: 18,
     });
     const closedClaimIcons = new VectorLayer({
       source: new Cluster({ distance: 34, source: closedClaimSource.current }),
-      style: claimClusterStyle("closed"), minZoom: MARKER_MIN_ZOOM, zIndex: 19,
+      style: claimClusterStyle("closed"), zIndex: 19,
     });
     claimIconLayers.current = { claims: activeClaimIcons, closedClaims: closedClaimIcons };
     overlays.current = { closedClaims, parcels, public: publicLand, easements, claims, places: lowZoomReference, water: hydroLabels, roads: roadLabels, mvum, peaks: geographicNames, cabins: cabinLayer };
@@ -584,33 +585,41 @@ export default function Home() {
     map.current = instance;
 
     // Load claim icons for the view after each pan/zoom (debounced; a newer move cancels an older load).
+    // Zoomed out, the whole state's closed claims load once; zoomed in, this view (plus a margin) loads
+    // with active claims too, so each closed claim can be checked for an active claim on it.
     let iconTimer: number | undefined;
     let iconAbort: AbortController | null = null;
-    let loaded: { bbox: BBox; zoom: number; want: string } | null = null;
+    let loaded: { bbox: BBox; want: string } | null = null;
+    /** What zoomed-in checks found per closed claim, so zoomed-out icons keep the answer. */
+    const knownCover = new globalThis.Map<string, boolean>();
     const loadIcons = () => {
       window.clearTimeout(iconTimer);
       iconTimer = window.setTimeout(async () => {
         const zoom = instance.getView().getZoom() ?? 0;
+        const zoomedIn = zoom >= MARKER_MIN_ZOOM;
         const want = { active: claimIconsWanted.current.claims, closed: claimIconsWanted.current.closedClaims };
-        if (zoom < MARKER_MIN_ZOOM || (!want.active && !want.closed) || !navigator.onLine) {
+        const view = clipToMontana(transformExtent(instance.getView().calculateExtent(instance.getSize()), "EPSG:3857", "EPSG:4326") as BBox);
+        if (!view || (!want.closed && !(want.active && zoomedIn)) || !navigator.onLine) {
           iconAbort?.abort(); setClaimIconNote(""); return;
         }
-        const [minX, minY, maxX, maxY] = transformExtent(instance.getView().calculateExtent(instance.getSize()), "EPSG:3857", "EPSG:4326");
-        const wantKey = `${want.active}/${want.closed}`;
-        // Skip when the last load already covers this view at a similar detail level.
-        if (loaded && loaded.want === wantKey && zoom - loaded.zoom < 2 && minX >= loaded.bbox[0] && minY >= loaded.bbox[1] && maxX <= loaded.bbox[2] && maxY <= loaded.bbox[3]) return;
-        const padX = (maxX - minX) * 0.25, padY = (maxY - minY) * 0.25;
-        const bbox: BBox = [minX - padX, minY - padY, maxX + padX, maxY + padY];
+        const wantKey = `${want.active && zoomedIn}/${want.closed}`;
+        // Skip when the last load already covers this view.
+        if (loaded && loaded.want === wantKey && view[0] >= loaded.bbox[0] && view[1] >= loaded.bbox[1] && view[2] <= loaded.bbox[2] && view[3] <= loaded.bbox[3]) return;
+        const padX = (view[2] - view[0]) * 0.25, padY = (view[3] - view[1]) * 0.25;
+        const bbox = zoomedIn ? clipToMontana([view[0] - padX, view[1] - padY, view[2] + padX, view[3] + padY]) ?? view : MONTANA_BBOX;
         iconAbort?.abort();
         const controller = new AbortController();
         iconAbort = controller;
         const r = await loadClaimMarkers(bbox, zoom, want, controller.signal);
         if (controller.signal.aborted) return;
+        if (r.coverChecked) r.closed.forEach(m => knownCover.set(m.id, m.covered === true));
+        const closed = r.closed.map(m => (m.covered === null && knownCover.has(m.id) ? { ...m, covered: knownCover.get(m.id) ?? null } : m));
         const toFeature = (m: ClaimMarker) => { const f = new Feature(new Point(fromLonLat([m.lon, m.lat]))); f.set("marker", m); return f; };
         // Replace a layer's icons only when its lookup worked, so a failed load never wipes icons to "none".
         if (!r.failed.includes("active")) { activeClaimSource.current.clear(); activeClaimSource.current.addFeatures(r.active.map(toFeature)); }
-        if (!r.failed.includes("closed")) { closedClaimSource.current.clear(); closedClaimSource.current.addFeatures(r.closed.map(toFeature)); }
-        loaded = r.failed.length || (want.closed && !r.coverChecked) ? null : { bbox, zoom, want: wantKey };
+        if (!r.failed.includes("closed")) { closedClaimSource.current.clear(); closedClaimSource.current.addFeatures(closed.map(toFeature)); }
+        // Retry on the next move after a failure, or when the view held more claims than one load returns.
+        loaded = r.failed.length || r.truncated ? null : { bbox, want: wantKey };
         setClaimIconNote(markerNote(r));
       }, 300);
     };
@@ -1033,7 +1042,7 @@ export default function Home() {
       </div>
 
       {keyOpen && (
-        <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: "12px", maxHeight: "75vh", overflowY: "auto" }}>
+        <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: "12px", maxHeight: "calc(100dvh - 205px - env(safe-area-inset-bottom))", overflowY: "auto" }}>
           
           {/* SECTION 1: WHAT CAN I CLAIM? */}
           <div>
@@ -1086,14 +1095,16 @@ export default function Home() {
                   <img src={CLAIM_ICON.closed.placer} alt="" width={20} height={20} style={{ flexShrink: 0 }} />
                   <span>
                     <strong style={{ color: "#38bdf8" }}>Closed Claims</strong>
-                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>Cyan squares: no active claim on it in BLM&apos;s map · grey: one is. Research before restaking</small>
+                    <small style={{ display: "block", color: "#94a3b8", fontSize: "10px" }}>Square icons, at any zoom. Research before restaking</small>
                   </span>
                 </span>
                 <input type="checkbox" checked={active.closedClaims} onChange={() => toggle("closedClaims")} style={{ accentColor: "#06b6d4", width: "16px", height: "16px", cursor: "pointer" }} />
               </label>
               <div style={{ padding: "0 8px" }}>
+                <KeyIcons items={[[CLAIM_ICON.closed.placer, "Closed, no active claim on it"], [CLAIM_ICON.covered.placer, "Closed, active claim on it now"], [CLAIM_ICON.unchecked.placer, "Closed, not checked yet (zoom in)"]]} />
+                <div style={{ height: "6px" }} />
                 <KeyIcons items={[[CLAIM_ICON.active.placer, "Placer claim"], [CLAIM_ICON.active.lode, "Lode claim"], [CLAIM_ICON.active.millsite, "Mill site"], [CLAIM_ICON.active.tunnel, "Tunnel site"]]} />
-                <small style={{ display: "block", color: "#94a3b8", fontSize: "9.5px", marginTop: "4px" }}>Claim icons show from zoom 11 in. A number = several claims; BLM often maps claims to the same survey square.</small>
+                <small style={{ display: "block", color: "#94a3b8", fontSize: "9.5px", marginTop: "4px" }}>Active-claim icons show from zoom 11 in. A number = several claims; BLM often maps claims to the same survey square.</small>
               </div>
 
               {/* 4. Private Property */}

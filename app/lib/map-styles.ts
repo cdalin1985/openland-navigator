@@ -7,7 +7,7 @@ import type { FeatureLike } from "ol/Feature";
 import { Circle, Fill, Icon, RegularShape, Stroke, Style, Text } from "ol/style";
 import type { CabinKind } from "./cabins";
 import type { ClaimMarker, ClaimStatus } from "./claim-markers";
-import { ACTIVE_CLAIM_COLOR, CLAIM_ICON, CLOSED_CLAIM_COLOR, COVERED_CLAIM_COLOR, RENTAL_ICON, type ClaimLook } from "./map-icons";
+import { ACTIVE_CLAIM_COLOR, CLAIM_ICON, CLOSED_CLAIM_COLOR, COVERED_CLAIM_COLOR, RENTAL_ICON, UNCHECKED_CLAIM_COLOR, UNCHECKED_CLAIM_FILL, type ClaimLook } from "./map-icons";
 
 const cache: Record<string, Style | Style[]> = {};
 const cached = (key: string, make: () => Style | Style[]) => (cache[key] ??= make());
@@ -25,16 +25,17 @@ export function rentalStyle(kind: CabinKind, size: "small" | "normal" | "selecte
   });
 }
 
-/** Which icon a single claim gets: active, closed with no active claim on it, or closed and covered/unchecked. */
+/** Which icon a single claim gets: active; closed with no active claim on it; closed with one on it; or closed and not checked. */
 export function claimLook(m: ClaimMarker): ClaimLook {
   if (m.status === "active") return "active";
-  return m.covered === false ? "closed" : "covered";
+  return m.covered === false ? "closed" : m.covered === true ? "covered" : "unchecked";
 }
 
 /**
  * Style for a clustered claim icon layer. One claim shows its type icon; several
- * claims close together (often the same BLM survey square) show a count badge,
- * cyan for closed claims if any of them has no active claim on it, otherwise grey.
+ * claims close together (often the same BLM survey square) show a count badge.
+ * Closed-claim badges are cyan if any of them has no active claim on it, a cyan
+ * outline if some weren't checked, and grey only when every one has an active claim on it.
  */
 export function claimClusterStyle(status: ClaimStatus) {
   return (cluster: FeatureLike): Style => {
@@ -45,18 +46,26 @@ export function claimClusterStyle(status: ClaimStatus) {
       const look = claimLook(m);
       return cached(`claim:${look}:${m.type}`, () => new Style({ image: new Icon({ src: CLAIM_ICON[look][m.type], scale: 0.72 }), zIndex: 1 })) as Style;
     }
-    const color = status === "active" ? ACTIVE_CLAIM_COLOR : markers.some(m => m.covered === false) ? CLOSED_CLAIM_COLOR : COVERED_CLAIM_COLOR;
+    const look = status === "active" ? "active"
+      : markers.some(m => m.covered === false) ? "closed"
+      : markers.some(m => m.covered === null) ? "unchecked" : "covered";
+    const [color, edge, ink] = {
+      active: [ACTIVE_CLAIM_COLOR, "#fff", "#fff"],
+      closed: [CLOSED_CLAIM_COLOR, "#fff", "#fff"],
+      covered: [COVERED_CLAIM_COLOR, "#fff", "#fff"],
+      unchecked: [UNCHECKED_CLAIM_FILL, UNCHECKED_CLAIM_COLOR, UNCHECKED_CLAIM_COLOR],
+    }[look];
     const count = markers.length;
     const label = count > 999 ? "999+" : String(count);
-    return cached(`cluster:${status}:${color}:${label}`, () => {
+    return cached(`cluster:${look}:${label}`, () => {
       const radius = Math.min(19, 11 + Math.log2(count) * 1.6);
-      const fill = new Fill({ color }), stroke = new Stroke({ color: "#fff", width: 2.5 });
+      const fill = new Fill({ color }), stroke = new Stroke({ color: edge, width: 2.5 });
       return new Style({
         // Squares for closed claims, circles for active, matching the single icons.
         image: status === "active"
           ? new Circle({ radius, fill, stroke })
           : new RegularShape({ points: 4, radius: radius * 1.25, angle: Math.PI / 4, fill, stroke }),
-        text: new Text({ text: label, font: "800 11px Arial, sans-serif", fill: new Fill({ color: "#fff" }) }),
+        text: new Text({ text: label, font: "800 11px Arial, sans-serif", fill: new Fill({ color: ink }) }),
         zIndex: 2,
       });
     }) as Style;

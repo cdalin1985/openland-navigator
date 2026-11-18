@@ -8,10 +8,16 @@
  * quarter section), not to its staked corners, so several claims often share one
  * shape and therefore one marker position. The map clusters those into a count.
  *
- * Closed claims are also compared with the active claims in the same view. A closed
- * claim whose centre lies inside an active claim's shape has an active claim mapped
- * on the same spot now. That comparison only reads BLM's map; tapping a marker runs
- * the full land check, which is what decides whether ground is open to stake.
+ * Closed claims show at every zoom level (Montana has only a few thousand in BLM's
+ * map); active claims, which number in the tens of thousands, show from zoom 11 in.
+ *
+ * Zoomed in, closed claims are also compared with the active claims in the same view.
+ * A closed claim whose centre lies inside an active claim's shape has an active claim
+ * mapped on the same spot now. Zoomed out that comparison isn't made (it would mean
+ * loading every active claim in the state; BLM's multipoint query, tried as a shortcut,
+ * returns incomplete results), so those closed claims are marked "not checked".
+ * The comparison only reads BLM's map; tapping a marker runs the full land check,
+ * which is what decides whether ground is open to stake.
  */
 import { CLAIMS_CLOSED_URL, CLAIMS_URL, arcgisFeatures, type ArcgisFeature } from "./land-status.ts";
 import { pointInRings, type BBox } from "./offline.ts";
@@ -39,12 +45,18 @@ export type ClaimMarkerResult = {
   truncated: boolean;
   /** Layers whose lookup failed. A failure is reported, never shown as "no claims here". */
   failed: ClaimStatus[];
-  /** False when closed claims couldn't be compared with active ones (they're all `covered: null`). */
+  /** False when closed claims weren't compared with active ones (they're all `covered: null`). */
   coverChecked: boolean;
+  /** True when that comparison was skipped on purpose because the map is zoomed out. */
+  zoomedOut: boolean;
 };
 
-/** Claim icons load from this zoom level in (about 30 miles across on a phone). */
+/** Active-claim icons, and the closed-vs-active check, start at this zoom (about 30 miles across on a phone). */
 export const MARKER_MIN_ZOOM = 11;
+/** The app covers Montana; claim queries are clipped to this box (the state's outline fits inside it). */
+export const MONTANA_BBOX: BBox = [-116.05, 44.36, -104.04, 49.0];
+/** Shapes are simplified by at most this much (about 50 m), so small claims never collapse to nothing. */
+const MAX_SIMPLIFY_DEG = 0.0005;
 /** BLM's maxRecordCount on both claim layers. */
 const PAGE_SIZE = 2000;
 /** Pages per layer per view: up to 4,000 claims. Busier views say "zoom in". */
@@ -127,6 +139,12 @@ export function degreesPerPixel(zoom: number): number {
   return 156543.03392 / 2 ** zoom / 111319.49;
 }
 
+/** The part of a box inside Montana's bounding box, or null when they don't overlap. */
+export function clipToMontana(b: BBox): BBox | null {
+  const out: BBox = [Math.max(b[0], MONTANA_BBOX[0]), Math.max(b[1], MONTANA_BBOX[1]), Math.min(b[2], MONTANA_BBOX[2]), Math.min(b[3], MONTANA_BBOX[3])];
+  return out[0] < out[2] && out[1] < out[3] ? out : null;
+}
+
 /** Fetch one claim layer for a box, paging up to MAX_PAGES. */
 async function fetchLayer(url: string, bbox: BBox, zoom: number, signal?: AbortSignal): Promise<{ features: ArcgisFeature[]; truncated: boolean }> {
   const features: ArcgisFeature[] = [];
@@ -141,8 +159,8 @@ async function fetchLayer(url: string, bbox: BBox, zoom: number, signal?: AbortS
       outFields: OUT_FIELDS,
       returnGeometry: "true",
       outSR: "4326",
-      maxAllowableOffset: degreesPerPixel(zoom).toFixed(6),
-      geometryPrecision: "6",
+      maxAllowableOffset: Math.min(degreesPerPixel(zoom), MAX_SIMPLIFY_DEG).toFixed(6),
+      geometryPrecision: "5",
       orderByFields: "OBJECTID",
       resultOffset: String(page * PAGE_SIZE),
       resultRecordCount: String(PAGE_SIZE),
@@ -155,9 +173,10 @@ async function fetchLayer(url: string, bbox: BBox, zoom: number, signal?: AbortS
 }
 
 /**
- * Load claim markers for a map box. Active claims are always fetched when either
- * kind is wanted, because the closed-claim "covered" check needs them; if that
- * lookup fails or is cut short, closed claims are left unchecked (covered: null).
+ * Load claim markers for a map box (clipped to Montana). From MARKER_MIN_ZOOM in,
+ * active claims are fetched whenever either kind is wanted, because the closed-claim
+ * "covered" check needs them; if that lookup fails or is cut short, or the map is
+ * zoomed out, closed claims are left unchecked (covered: null).
  */
 export async function loadClaimMarkers(
   bbox: BBox,
@@ -165,18 +184,20 @@ export async function loadClaimMarkers(
   want: { active: boolean; closed: boolean },
   signal?: AbortSignal,
 ): Promise<ClaimMarkerResult> {
-  const result: ClaimMarkerResult = { active: [], closed: [], truncated: false, failed: [], coverChecked: false };
-  if (!want.active && !want.closed) return result;
+  const zoomedIn = zoom >= MARKER_MIN_ZOOM;
+  const result: ClaimMarkerResult = { active: [], closed: [], truncated: false, failed: [], coverChecked: false, zoomedOut: !zoomedIn };
+  const box = clipToMontana(bbox);
+  if (!box || (!want.closed && !(want.active && zoomedIn))) return result;
   const [active, closed] = await Promise.allSettled([
-    fetchLayer(CLAIMS_URL, bbox, zoom, signal),
-    want.closed ? fetchLayer(CLAIMS_CLOSED_URL, bbox, zoom, signal) : Promise.resolve({ features: [], truncated: false }),
+    zoomedIn ? fetchLayer(CLAIMS_URL, box, zoom, signal) : Promise.reject(new Error("zoomed out")),
+    want.closed ? fetchLayer(CLAIMS_CLOSED_URL, box, zoom, signal) : Promise.resolve({ features: [], truncated: false }),
   ]);
   if (active.status === "fulfilled") {
     if (want.active) {
       result.active = toMarkers(active.value.features, "active");
       result.truncated ||= active.value.truncated;
     }
-  } else if (want.active) {
+  } else if (want.active && zoomedIn) {
     result.failed.push("active");
   }
   if (closed.status === "fulfilled") {
@@ -200,7 +221,7 @@ export function markerNote(r: Omit<ClaimMarkerResult, "active">): string {
   if (r.failed.length === 2) notes.push("Couldn't load claim icons from BLM. The pink and cyan claim areas still show; tap a spot to check it.");
   else if (r.failed.includes("active")) notes.push("Couldn't load active claim icons from BLM. Tap a spot to check it.");
   else if (r.failed.includes("closed")) notes.push("Couldn't load closed claim icons from BLM. Tap a spot to check it.");
-  if (r.closed.length && !r.coverChecked) notes.push("Closed claims couldn't be compared with active ones, so they're grey.");
+  if (r.closed.length && !r.coverChecked && !r.zoomedOut) notes.push("Closed claims couldn't be compared with active ones, so they show as outlines (not checked).");
   if (r.truncated) notes.push("Too many claims here to show every icon. Zoom in to see them all.");
   return notes.join(" ");
 }
