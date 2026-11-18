@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Builds app/data/mt-cabins.json: every Forest Service rental cabin / lookout /
- * guard station inside the state of Montana, with coordinates and a verified
+ * guard station / bunkhouse inside the state of Montana, plus the BLM rental cabins
+ * and houses that recreation.gov lists in Montana, with coordinates and a verified
  * recreation.gov booking link.
  *
  * Sources (all public, no API key):
@@ -145,12 +146,21 @@ export function namesAgree(a, b) {
   return small.every(t => big.includes(t));
 }
 
-/** Cabin, lookout or guard station — used for the popup label. */
+/**
+ * Cabin, lookout, guard station or house — picks the map icon and the popup label.
+ * "House" is the larger buildings rented whole: bunkhouses, the Savenac cookhouse and
+ * cottages, homesteads, and BLM's Henneberry House. Names like "Antone Station" are
+ * plain rental cabins (the Forest Service page calls it "the Antone Cabin").
+ */
 export function kindOf(name) {
   if (/lookout/i.test(name)) return "Lookout";
   if (/guard station|ranger station|ranger'?s house/i.test(name)) return "Guard station";
+  if (/bunkhouse|cookhouse|cottage|homestead|\bhouse\b/i.test(name)) return "House";
   return "Cabin";
 }
+
+/** recreation.gov agency names this build accepts, and the short code stored in the data. */
+const AGENCIES = { "USDA Forest Service": "USFS", "Bureau of Land Management": "BLM" };
 
 /** Run `fn` over `items` with a small, polite concurrency. */
 async function pool(items, size, fn) {
@@ -271,13 +281,14 @@ async function resolveBooking(cabin, res, log) {
   return null;
 }
 
-const EXTRA_TERMS = ["cabin", "lookout", "guard station", "ranger station", "bunkhouse", "cottage", "homestead", "cookhouse", "station"];
-const EXTRA_NAME = /cabin|lookout|guard station|ranger station|bunkhouse|cottage|homestead|cookhouse|station/i;
+const EXTRA_TERMS = ["cabin", "lookout", "guard station", "ranger station", "bunkhouse", "cottage", "homestead", "cookhouse", "station", "house"];
+const EXTRA_NAME = /cabin|lookout|guard station|ranger station|bunkhouse|cottage|homestead|cookhouse|station|\bhouse\b/i;
 const EXTRA_SKIP = /campground|trailhead|group|picnic|day use|boat|horse|\brv\b|shuttle|ticket|permit|tour/i;
 
 /**
- * Montana Forest Service rental cabins that recreation.gov lists but the USFS layer
- * does not. Name-filtered client-side (the search is fuzzy), reservable only.
+ * Montana rental cabins that recreation.gov lists but the USFS layer does not:
+ * Forest Service ones the layer misses, and BLM's (the USFS layer has no BLM sites).
+ * Name-filtered client-side (the search is fuzzy), reservable only.
  */
 async function fetchRecGovCabins() {
   const found = new Map();
@@ -290,7 +301,7 @@ async function fetchRecGovCabins() {
       const json = await res.json();
       const rows = json.results ?? [];
       for (const r of rows) {
-        if (r.entity_type !== "campground" || r.org_name !== "USDA Forest Service" || r.state_code !== "Montana" || r.reservable === false) continue;
+        if (r.entity_type !== "campground" || !AGENCIES[r.org_name] || r.state_code !== "Montana" || r.reservable === false) continue;
         if (!EXTRA_NAME.test(r.name) || EXTRA_SKIP.test(r.name)) continue;
         found.set(String(r.entity_id), r);
       }
@@ -370,6 +381,7 @@ async function main() {
     return {
       id: cabin.id,
       src: "usfs",
+      agency: "USFS",
       name: cleanName(cabin.name),
       kind: kindOf(cabin.name),
       forest: String(a.forestname ?? "").replace(/\s+National Forests?$/i, " NF").trim(),
@@ -383,7 +395,7 @@ async function main() {
     };
   });
 
-  // Add Montana Forest Service cabins that recreation.gov lists but the USFS layer lacks.
+  // Add Montana rentals that recreation.gov lists but the USFS layer lacks (including every BLM one).
   const haveIds = new Set(resolved.filter(Boolean).map(b => b.id));
   const added = [];
   for (const r of recGov) {
@@ -394,7 +406,8 @@ async function main() {
     if (!(await hasBookableSites(id))) { log.push(`SKIPPED recreation.gov-only "${r.name}" (id ${id}): no bookable sites on recreation.gov`); continue; }
     // Same place as a Forest Service entry we could not link? Attach the link instead of adding a duplicate.
     // Only unlinked entries are candidates: a cabin that already has its own verified id is a different facility.
-    const twin = cabins.find(c => !c.bookUrl && namesAgree(c.name, cleanName(String(r.name))) && haversineKm(c.lat, c.lon, lat, lon) <= 3);
+    const agency = AGENCIES[r.org_name];
+    const twin = agency === "USFS" && cabins.find(c => !c.bookUrl && namesAgree(c.name, cleanName(String(r.name))) && haversineKm(c.lat, c.lon, lat, lon) <= 3);
     if (twin) {
       twin.bookUrl = `${RG}/camping/campgrounds/${id}`; twin.note = "";
       log.push(`MATCHED ${twin.name} -> recreation.gov "${r.name}" (id ${id}) by name and location`);
@@ -403,8 +416,9 @@ async function main() {
     const name = cleanName(prettyName(String(r.name)));
     added.push(name);
     cabins.push({
-      id: Number(id), src: "recreation.gov", name, kind: kindOf(name),
-      forest: String(r.parent_name ?? "").replace(/\s+National Forests?$/i, " NF").trim(),
+      id: Number(id), src: "recreation.gov", agency, name, kind: kindOf(name),
+      // recreation.gov's BLM "parent" names are recreation areas or misspelled offices ("Dillion"), so BLM rows just say BLM.
+      forest: agency === "BLM" ? "Bureau of Land Management" : String(r.parent_name ?? "").replace(/\s+National Forests?$/i, " NF").trim(),
       status: "unknown",
       lat: Math.round(lat * 1e5) / 1e5, lon: Math.round(lon * 1e5) / 1e5,
       bookUrl: `${RG}/camping/campgrounds/${id}`, note: "",
@@ -438,7 +452,7 @@ async function main() {
     sources: [
       "USDA Forest Service Recreation Opportunities (EDW_RecreationOpportunities_01), activity 'Cabin Rentals'",
       "US Census Bureau TIGERweb state boundary (Montana)",
-      "Recreation.gov facility records (booking links verified against the live site)",
+      "Recreation.gov facility records, Forest Service and BLM (booking links verified against the live site)",
     ],
     count: cabins.length,
     cabins,
