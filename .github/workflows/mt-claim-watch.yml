@@ -5,7 +5,10 @@ name: Montana claim watch
 
 on:
   schedule:
+    # GitHub starts scheduled runs late or drops them under load (Nov 18-22 every 09:23 run started 7-9 hours late),
+    # so a second daily run is a backup. A run that finds nothing new just republishes the same list.
     - cron: "23 9 * * *" # 09:23 UTC, about 2:23 AM in Montana
+    - cron: "23 21 * * *" # 21:23 UTC, about 2:23 PM in Montana
   workflow_dispatch: {}
 
 permissions:
