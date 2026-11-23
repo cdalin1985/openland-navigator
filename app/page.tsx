@@ -1050,7 +1050,8 @@ export default function Home() {
 
 
     {/* ===== KID-PROOF FLOATING INTERACTIVE MAP KEY ===== */}
-    {!layers && <div className="map-key" style={{
+    {/* The key describes the map, so it shows only on the Explore tab (on phones it otherwise covered the other tabs' sheets). */}
+    {!layers && navTab === "explore" && <div className="map-key" style={{
       position: "absolute",
       top: "74px",
       right: "14px",
