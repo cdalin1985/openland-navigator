@@ -24,3 +24,16 @@ header form{min-width:0}.logo,header .icon{flex-shrink:0}
 /* Zoom and location buttons sit on the left, clear of the Map Key and Layers panel on the right. */
 .tools{left:14px;right:auto}
 @media (min-width:800px){.tools{left:24px;right:auto}}
+
+/* Phones: the top button strip gets the full width (on wider screens it stops short of the Map Key),
+   so the Map Key and the claim-icon note move down below it; the key's open height shrinks to match. */
+@media (max-width:640px){
+  .top-strip{right:14px!important}
+  .map-key{top:116px!important}
+  .map-key-body{max-height:calc(100dvh - 250px - env(safe-area-inset-bottom))!important}
+  .icon-note{top:170px}
+  /* Land, claim and cabin panels start below the moved Map Key so its button never covers their close button.
+     "aside" outranks the inline .panel.parcel rule in page.tsx. */
+  /* ...and sit above the Map Key (25) while open, like the cabin card, so an open key never hides them. */
+  aside.panel.parcel{top:166px!important;max-height:calc(100dvh - 256px - env(safe-area-inset-bottom))!important;z-index:26}
+}

@@ -129,7 +129,7 @@ The map puts an icon on BLM mining claims (`app/lib/claim-markers.ts`), read liv
 
 ## Nightly Montana Claim Watch
 
-`.github/workflows/mt-claim-watch.yml` runs `scripts/mt-claim-watch.mjs` every night at 09:23 UTC (free on GitHub's standard runners for public repos). It reads every BLM claim inside Montana's outline (open and closed), compares it with the previous night, and records what changed: claims that closed, new filings, claims BLM dropped from its open map, and closures BLM reversed. Results go to the `data` branch as `mt-claim-changes.json` (last 120 days) plus the full snapshot; each night replaces that branch with one commit, so it never builds up history.
+`.github/workflows/mt-claim-watch.yml` runs `scripts/mt-claim-watch.mjs` twice a day, at 09:23 and 21:23 UTC (free on GitHub's standard runners for public repos). The second run is a backup: GitHub starts scheduled runs late or drops them under load. It reads every BLM claim inside Montana's outline (open and closed), compares it with the previous night, and records what changed: claims that closed, new filings, claims BLM dropped from its open map, and closures BLM reversed. Results go to the `data` branch as `mt-claim-changes.json` (last 120 days) plus the full snapshot; each night replaces that branch with one commit, so it never builds up history.
 
 The app reads the list from `https://raw.githubusercontent.com/cdalin1985/openland-navigator/data/mt-claim-changes.json` for the **Recently closed in Montana** panel and the yellow rings. A failed or incomplete BLM read stops the run without writing; a night where open claims drop by more than 25% is refused as a bad read (`--force` overrides). The first run only records a baseline.
 
@@ -141,6 +141,15 @@ npm run data:claim-watch
 ```
 
 Start it by hand: Actions tab, **Montana claim watch**, **Run workflow**. GitHub turns scheduled workflows off after 60 days without repository activity; if the panel says the check has stopped, re-enable it on the same page.
+
+## Quick-Jump Spots
+
+The buttons in the map's top bar (`app/lib/hotspots.ts`) jump to creek-side points where the app's own land check said "likely open for casual panning" when they were last verified: BLM or National Forest land, no active claim within 25 m, no withdrawal or wilderness closure. Tapping one runs the live land check there, because claims change. Re-verify them (exits 1 if any spot has changed):
+
+```bash
+cd /path/to/openland-navigator
+npm run check:hotspots
+```
 
 ## Learn More
 

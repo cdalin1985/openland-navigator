@@ -30,6 +30,7 @@ import { checkLandSmart, loadAllAreas, offlineFlowlines, type BBox } from "./lib
 import OfflineAreas from "./components/OfflineAreas";
 import RecentClosures from "./components/RecentClosures";
 import { loadClaimChanges, recentClosureIds } from "./lib/claim-changes";
+import { HOTSPOTS, HOTSPOTS_CHECKED } from "./lib/hotspots";
 import Polygon from "ol/geom/Polygon";
 import cabinData from "./data/mt-cabins.json";
 import { CABIN_KINDS, KIND_LABEL, RESERVATION_PHONE, cabinSubtitle, searchCabins, type Cabin, type CabinData } from "./lib/cabins";
@@ -962,8 +963,8 @@ export default function Home() {
       </div>
     )}
 
-    {/* ===== 1-TAP MONTANA GOLD & SAPPHIRE HOTSPOTS BAR ===== */}
-    <div style={{
+    {/* ===== TOP BUTTON STRIP: closed-claim tools + checked quick-jump spots (full width on phones, see globals.css) ===== */}
+    <div className="top-strip" style={{
       position: "absolute",
       top: "74px",
       left: "14px",
@@ -1010,17 +1011,15 @@ export default function Home() {
         🔎 Scan view for closed claims
       </button>
       <button onClick={() => setAppMode(appMode === "beginner" ? "staker" : "beginner")} style={{ background: appMode === "beginner" ? "linear-gradient(135deg, #16a34a, #15803d)" : "linear-gradient(135deg, #eab308, #ca8a04)", color: appMode === "beginner" ? "#fff" : "#000", border: "1px solid #fff", borderRadius: "999px", padding: "6px 14px", fontSize: "11px", fontWeight: 900, whiteSpace: "nowrap", cursor: "pointer" }}>{appMode === "beginner" ? "🪣 Mode: Beginner Panning (Tap for Staker)" : "📐 Mode: Claim Staker & Flipper (Tap for Beginner)"}</button>
-      {[
-        { label: "💎 Hauser Lake (Sapphires)", lon: -111.885, lat: 46.662, z: 12.8 },
-        { label: "🪙 Marysville (Gold)", lon: -112.302, lat: 46.748, z: 13.2 },
-        { label: "🪙 Confederate Gulch (Gold)", lon: -111.535, lat: 46.545, z: 13.0 },
-        { label: "💎 Elliston (Quartz/Gold)", lon: -112.432, lat: 46.525, z: 13.0 },
-        { label: "🪙 Virginia City (Alder Gulch)", lon: -111.945, lat: 45.293, z: 13.0 },
-        { label: "💎 Philipsburg (Sapphires)", lon: -113.485, lat: 46.185, z: 12.8 }
-      ].map(spot => (
+      {HOTSPOTS.map(spot => (
         <button
           key={spot.label}
-          onClick={() => map.current?.getView().animate({ center: fromLonLat([spot.lon, spot.lat]), zoom: spot.z, duration: 750 })}
+          title={`${spot.note}. Public land with no active claim when checked ${HOTSPOTS_CHECKED}; tapping re-checks it live.`}
+          onClick={() => {
+            // Fly there and run the live land check: claims change, so the button never vouches for the spot by itself.
+            map.current?.getView().animate({ center: fromLonLat([spot.lon, spot.lat]), zoom: spot.zoom, duration: 750 });
+            void inspectRef.current?.(spot.lon, spot.lat);
+          }}
           style={{
             background: "rgba(15, 23, 42, 0.9)",
             backdropFilter: "blur(10px)",
@@ -1042,7 +1041,7 @@ export default function Home() {
 
 
     {/* ===== KID-PROOF FLOATING INTERACTIVE MAP KEY ===== */}
-    {!layers && <div style={{
+    {!layers && <div className="map-key" style={{
       position: "absolute",
       top: "74px",
       right: "14px",
@@ -1086,7 +1085,7 @@ export default function Home() {
       </div>
 
       {keyOpen && (
-        <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: "12px", maxHeight: "calc(100dvh - 205px - env(safe-area-inset-bottom))", overflowY: "auto" }}>
+        <div className="map-key-body" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: "12px", maxHeight: "calc(100dvh - 205px - env(safe-area-inset-bottom))", overflowY: "auto" }}>
           
           {/* SECTION 1: WHAT CAN I CLAIM? */}
           <div>
