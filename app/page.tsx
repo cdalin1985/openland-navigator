@@ -28,6 +28,7 @@ import {
 } from "./lib/land-status";
 import { checkLandSmart, loadAllAreas, offlineFlowlines, type BBox } from "./lib/offline";
 import OfflineAreas from "./components/OfflineAreas";
+import ClaimAlerts from "./components/ClaimAlerts";
 import RecentClosures from "./components/RecentClosures";
 import { loadClaimChanges, recentClosureIds } from "./lib/claim-changes";
 import { HOTSPOTS, HOTSPOTS_CHECKED } from "./lib/hotspots";
@@ -540,6 +541,16 @@ export default function Home() {
       setParcelMessage(check.failed.length ? `Some records couldn't be checked · ${checkedAt}` : `BLM + Montana cadastral records · checked ${checkedAt}`);
     };
     inspectRef.current = runInspect;
+
+    // Links like ?lat=46.5&lon=-112.1 (in claim-alert emails) open the map there and run the land check.
+    const linked = new URLSearchParams(window.location.search);
+    const linkLat = Number(linked.get("lat")), linkLon = Number(linked.get("lon"));
+    if (linked.has("lat") && linked.has("lon") && Number.isFinite(linkLat) && Number.isFinite(linkLon)
+      && linkLon >= MONTANA_BBOX[0] && linkLon <= MONTANA_BBOX[2] && linkLat >= MONTANA_BBOX[1] && linkLat <= MONTANA_BBOX[3]) {
+      instance.getView().setCenter(fromLonLat([linkLon, linkLat]));
+      instance.getView().setZoom(15);
+      window.setTimeout(() => { void runInspect(linkLon, linkLat); }, 0);
+    }
 
     const selectCabin = (cabin: Cabin) => {
       setParcelOpen(false); setClaimOpen(false); setPlaceResults([]); setSearchMessage(""); setLayers(false);
@@ -1469,6 +1480,10 @@ export default function Home() {
       </div>}
       {navTab === "more" && <div className="tab-content">
         <div className="quick-grid"><button onClick={() => { openTab("explore"); locate(); }}><b>⌾</b><span>My location</span></button><button onClick={() => { openTab("explore"); setLayers(true); }}><b>▱</b><span>Map layers</span></button><button onClick={() => { setBase(base === "usgs" ? "topo" : base === "topo" && googleMaps ? "google" : "usgs"); openTab("explore"); }}><b>◫</b><span>{base === "usgs" ? "Topo map" : base === "topo" && googleMaps ? "Google satellite" : "USGS satellite"}</span></button><button onClick={clearMap}><b>⌫</b><span>Clear destination</span></button></div>
+        <ClaimAlerts
+          getViewBBox={viewBBox}
+          onGoTo={bbox => { openTab("explore"); map.current?.getView().fit(transformExtent(bbox, "EPSG:4326", "EPSG:3857"), { duration: 600, padding: [40, 40, 40, 40] }); }}
+        />
         <OfflineAreas
           getViewBBox={viewBBox}
           onGoTo={bbox => map.current?.getView().fit(transformExtent(bbox, "EPSG:4326", "EPSG:3857"), { duration: 600, padding: [40, 40, 40, 40] })}

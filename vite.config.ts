@@ -20,6 +20,8 @@ const localBindingConfig = {
           binding: d1,
           database_name: "site-creator-d1",
           database_id: SITE_CREATOR_PLACEHOLDER_DATABASE_ID,
+          // Drizzle writes migrations to ./drizzle (drizzle.config.ts); point D1 there instead of the default ./migrations.
+          migrations_dir: "drizzle",
         },
       ]
     : [],

@@ -37,3 +37,9 @@ header form{min-width:0}.logo,header .icon{flex-shrink:0}
   /* ...and sit above the Map Key (25) while open, like the cabin card, so an open key never hides them. */
   aside.panel.parcel{top:166px!important;max-height:calc(100dvh - 256px - env(safe-area-inset-bottom))!important;z-index:26}
 }
+
+/* Claim alerts card (More tab) */
+.claim-alerts .alerts-name{width:100%;margin:8px 0 6px;padding:10px;border:1px solid #ffffff26;border-radius:10px;background:#0b171c;color:#fff;font:inherit;font-size:12px}
+.claim-alerts .alerts-signin{display:block;margin:8px 0;text-align:center;text-decoration:none}
+.claim-alerts .alerts-off{padding:8px 10px;border-radius:8px;background:#3b2f12;color:#fde68a!important}
+.claim-alerts .save-current{width:100%}

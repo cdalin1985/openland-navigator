@@ -52,3 +52,17 @@ jobs:
           git add mt-claims-snapshot.json mt-claim-changes.json
           git commit -q -m "Montana claim watch $(date -u +%F)"
           git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:data
+
+      # Claim-alert emails: hand tonight's change list to the Site, which emails each watched area.
+      # Skipped until the repository variable ALERTS_RUN_URL (https://<site>/api/alerts/run) and the
+      # secret ALERTS_RUN_SECRET (same value as the Site's ALERTS_RUN_SECRET) are set.
+      - name: Send claim-alert emails
+        if: ${{ vars.ALERTS_RUN_URL != '' }}
+        env:
+          ALERTS_RUN_URL: ${{ vars.ALERTS_RUN_URL }}
+          ALERTS_RUN_SECRET: ${{ secrets.ALERTS_RUN_SECRET }}
+        run: |
+          curl --fail-with-body -sS -X POST "$ALERTS_RUN_URL" \
+            -H "Authorization: Bearer $ALERTS_RUN_SECRET" \
+            -H "content-type: application/json" \
+            --data-binary @claim-data/mt-claim-changes.json
