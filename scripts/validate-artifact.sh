@@ -20,8 +20,21 @@ hosting="${SITES_PROJECT_ROOT}/dist/.openai/hosting.json"
 }
 
 node --input-type=module - "${worker}" "${hosting}" <<'NODE'
+import { register } from "node:module";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+
+// The Worker runs on Cloudflare, where "cloudflare:*" modules exist; plain Node can't load them.
+// vinext 1.x always imports "cloudflare:workers" (for request tracing), so this check stands in
+// an empty module for any "cloudflare:" import. It only checks the artifact's shape below.
+register(
+  "data:text/javascript," +
+    encodeURIComponent(
+      'export async function resolve(specifier, context, next) {' +
+        ' if (specifier.startsWith("cloudflare:")) return { url: "data:text/javascript,export {};", shortCircuit: true };' +
+        " return next(specifier, context); }",
+    ),
+);
 
 const [workerPath, hostingPath] = process.argv.slice(2);
 JSON.parse(await readFile(hostingPath, "utf8"));

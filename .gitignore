@@ -43,3 +43,7 @@ next-env.d.ts
 
 # Local runs of scripts/mt-claim-watch.mjs
 claim-data/
+
+# vinext 1.x build caches
+.vinext/cache/
+.vinext/dev/
