@@ -694,6 +694,15 @@ export default function Home() {
     googleCopyright.current?.();
   }, [base, googleMaps]);
 
+  // Phones: start with the Map Key collapsed so it doesn't cover most of the map ("Show +" opens it).
+  // Set after the first render (in a timer, like the connectivity check below) so server and client HTML match.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (window.matchMedia("(max-width: 640px)").matches) setKeyOpen(false);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   // Offline support: register the service worker (caches the app and saved USGS tiles) and track connectivity.
   useEffect(() => {
     if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
