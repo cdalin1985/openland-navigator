@@ -47,3 +47,6 @@ claim-data/
 # vinext 1.x build caches
 .vinext/cache/
 .vinext/dev/
+
+# Local Worker secrets for development (never commit)
+.dev.vars

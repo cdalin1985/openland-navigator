@@ -142,6 +142,21 @@ npm run data:claim-watch
 
 Start it by hand: Actions tab, **Montana claim watch**, **Run workflow**. GitHub turns scheduled workflows off after 60 days without repository activity; if the panel says the check has stopped, re-enable it on the same page.
 
+## Claim Alerts (Email)
+
+Signed-in visitors (Sign in with ChatGPT, provided by Sites) can save up to 10 map areas in **More > Claim alerts**. After each nightly claim watch, the GitHub workflow posts the change list to `/api/alerts/run`, and the Site emails each area's new changes (claims closed, new claims filed, closures reversed) through Resend. Each change is emailed once; every email has a one-click unsubscribe link. Links in the email (`/?lat=…&lon=…`) open the map at the claim and run the land check.
+
+Code: `db/schema.ts` and `drizzle/` (D1 tables), `app/lib/alerts*.ts`, `app/lib/email.ts`, `app/api/watches/`, `app/api/alerts/`, `app/components/ClaimAlerts.tsx`. Until the values below are set, areas can be saved but nothing is emailed (the run reports a dry run).
+
+Turning email on:
+1. Own a domain you can add DNS records to. Resend only delivers to other people from a verified domain.
+2. Create a Resend account, add and verify the domain (https://resend.com/domains), and create an API key (https://resend.com/api-keys). The free plan is 3,000 emails a month, 100 a day.
+3. In the Site's settings (Sites in ChatGPT > the site > More actions > Settings), add the secrets `RESEND_API_KEY`, `ALERTS_FROM` (e.g. `OpenLand Alerts <alerts@yourdomain.com>`) and `ALERTS_RUN_SECRET` (a long random string).
+4. In GitHub (Settings > Secrets and variables > Actions), add the secret `ALERTS_RUN_SECRET` with the same value, and the variable `ALERTS_RUN_URL` set to `https://<your site>/api/alerts/run`.
+5. Redeploy so Sites creates the D1 database, applies `drizzle/`, and enables Sign in with ChatGPT.
+
+Local testing: `npm run build`, then apply the migration with `npx wrangler d1 migrations apply site-creator-d1 --local --config dist/server/wrangler.json --persist-to .wrangler/state` and `npm start`. Requests count as signed in when they carry the `oai-authenticated-user-email` header, which Sites sets after Sign in with ChatGPT.
+
 ## Quick-Jump Spots
 
 The buttons in the map's top bar (`app/lib/hotspots.ts`) jump to creek-side points where the app's own land check said "likely open for casual panning" when they were last verified: BLM or National Forest land, no active claim within 25 m, no withdrawal or wilderness closure. Tapping one runs the live land check there, because claims change. Re-verify them (exits 1 if any spot has changed):
